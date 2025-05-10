@@ -103,7 +103,7 @@ class ROS1Backend(Backend):
         try:
             rospy.init_node("simulator_vehicle_" + str(vehicle_id),  disable_signals=True)
         except:
-            # If rospy is already initialized, just ignore the exception
+            # If rclpy is already initialized, just ignore the exception
             pass
 
         # Initialize the publishers and subscribers
@@ -170,31 +170,32 @@ class ROS1Backend(Backend):
 
         if self._pub_clock:
             clock_topic = "clock"
-            try:
-                og.Controller.edit(
-                    {"graph_path": "/ActionGraph", "evaluator_name": "execution"},
-                    {
-                        og.Controller.Keys.CREATE_NODES: [
-                            ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-                            ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
-                            ("PublishClock", "isaacsim.ros1.bridge.ROS1PublishClock"),
-                        ],
-                        og.Controller.Keys.CONNECT: [
-                            # Connecting execution of OnPlaybackTick node to PublishClock  to automatically publish each frame
-                            ("OnPlaybackTick.outputs:tick", "PublishClock.inputs:execIn"),
-                            # Connecting simulationTime data of ReadSimTime to the clock publisher nodes
-                            ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
-                        ],
-                        og.Controller.Keys.SET_VALUES: [
-                            # Assigning topic names to clock publishers
-                            ("PublishClock.inputs:topicName", clock_topic),
-                        ],
-                    },
-                )
-            except Exception as e:
-                print(e)
-                sim_app.close()
-                exit()
+            self.clock_pub = rospy.Publisher(clock_topic, Clock, queue_size=1000)
+            # try:
+            #     og.Controller.edit(
+            #         {"graph_path": "/ActionGraph", "evaluator_name": "execution"},
+            #         {
+            #             og.Controller.Keys.CREATE_NODES: [
+            #                 ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+            #                 ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+            #                 ("PublishClock", "isaacsim.ros1.bridge.ROS1PublishClock"),
+            #             ],
+            #             og.Controller.Keys.CONNECT: [
+            #                 # Connecting execution of OnPlaybackTick node to PublishClock  to automatically publish each frame
+            #                 ("OnPlaybackTick.outputs:tick", "PublishClock.inputs:execIn"),
+            #                 # Connecting simulationTime data of ReadSimTime to the clock publisher nodes
+            #                 ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+            #             ],
+            #             og.Controller.Keys.SET_VALUES: [
+            #                 # Assigning topic names to clock publishers
+            #                 ("PublishClock.inputs:topicName", clock_topic),
+            #             ],
+            #         },
+            #     )
+            # except Exception as e:
+            #     print(e)
+            #     sim_app.close()
+            #     exit()
 
             rospy.set_param("/use_sim_time", True)
         
@@ -249,7 +250,10 @@ class ROS1Backend(Backend):
         """
         Method that when implemented, should handle the receivel of the state of the vehicle using this callback
         """
-        
+
+        if self._pub_clock:
+            self.clock_pub.publish(rospy.Time.from_sec(self.pg.world.current_time))
+
         # Publish the state of the vehicle only if the flag is set to True
         if not self._pub_state:
             return
