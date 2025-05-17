@@ -14,7 +14,7 @@ from isaacsim import SimulationApp
 # Start Isaac Sim's simulation environment
 # Note: this simulation app must be instantiated right after the SimulationApp import, otherwise the simulator will crash
 # as this is the object that will load all the extensions and load the actual simulator.
-simulation_app = SimulationApp({"headless": False})
+simulation_app = SimulationApp({"headless": True})
 
 # -----------------------------------
 # The actual script should start here
@@ -37,7 +37,6 @@ from scipy.spatial.transform import Rotation
 # Import the custom python control backend
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + '/utils')
-from nonlinear_controller import NonlinearController
 
 # Use pathlib for parsing the desired trajectory from a CSV file
 from pathlib import Path
@@ -64,7 +63,7 @@ class PegasusApp:
         self.world = self.pg.world
 
         # Launch one of the worlds provided by NVIDIA
-        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Curved Gridroom"])
+        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Warehouse"])
 
         # Get the current directory used to read trajectories and save results
         self.curr_dir = str(Path(os.path.dirname(os.path.realpath(__file__))).resolve())
@@ -76,6 +75,17 @@ class PegasusApp:
                 prim_path="/new_cube_2",
                 name="cube_1",
                 position=np.array([-3.0, 0, 2.0]),
+                scale=np.array([1.0, 1.0, 1.5]),
+                size=1.0,
+                color=np.array([255, 0, 0]),
+            )
+        )
+
+        cube_3 = self.world.scene.add(
+            DynamicCuboid(
+                prim_path="/new_cube_3",
+                name="cube_2",
+                position=np.array([-1.9, 1.3, 2.0]),
                 scale=np.array([1.0, 1.0, 1.0]),
                 size=1.0,
                 color=np.array([255, 0, 0]),
@@ -92,12 +102,6 @@ class PegasusApp:
         #     "px4_dir": "/home/marcelo/PX4-Autopilot"
         # })
         config_multirotor.backends = [
-            NonlinearController(
-                trajectory_file=self.curr_dir + "/trajectories/pitch_relay_90_deg_2.csv",
-                results_file=self.curr_dir + "/results/single_statistics.npz",
-                Ki=[0.5, 0.5, 0.5],
-                Kr=[2.0, 2.0, 2.0]
-            ),
             ROS1Backend(vehicle_id=1, 
                         sim_app= simulation_app,
                         config={
@@ -105,7 +109,7 @@ class PegasusApp:
                             "pub_sensors": True,
                             "pub_graphical_sensors": True,
                             "pub_state": True,
-                            "sub_control": False,
+                            "sub_control": True,
                             "pub_tf": True,
                             "pub_clock": True})]
 

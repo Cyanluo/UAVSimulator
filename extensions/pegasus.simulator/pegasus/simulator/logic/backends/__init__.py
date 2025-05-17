@@ -13,3 +13,10 @@ try:
 except:
     import carb
     carb.log_warn("ROS2 package not installed. ROS2Backend will not be available")
+
+import sys, os
+# Use pathlib for parsing the desired trajectory from a CSV file
+from pathlib import Path
+# Get the current directory used to read trajectories and save results
+curr_dir = str(Path(os.path.dirname(os.path.realpath(__file__))).resolve())
+sys.path.append(curr_dir + '/utils')

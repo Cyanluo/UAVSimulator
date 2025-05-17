@@ -18,6 +18,7 @@ from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import Imu, MagneticField, NavSatFix, NavSatStatus
 from geometry_msgs.msg import PoseStamped, TwistStamped, AccelStamped
 from rosgraph_msgs.msg import Clock
+from nav_msgs.msg import Odometry
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 
 # TF imports
@@ -29,7 +30,12 @@ except ImportError:
     carb.log_warn("TF2 ROS not installed. Will not publish TFs with the ROS1 backend")
     tf2_ros_loaded = False
 
+import isaacsim.core.utils.prims as prims_utils
+import isaacsim.core.utils.transformations as transformations_utils
+from scipy.spatial.transform import Rotation as R
+
 from pegasus.simulator.logic.backends.backend import Backend
+from pegasus.simulator.logic.controller.position_controller import trajController
 
 # Import the replicatore core module used for writing graphical data to ROS 2
 import omni
@@ -38,6 +44,10 @@ import omni.replicator.core as rep
 import omni.syntheticdata._syntheticdata as sd
 
 import rosgraph
+
+import numpy as np
+
+from quadrotor_msgs.msg import PositionCommand
 
 
 class ROS1Backend(Backend):
@@ -53,18 +63,11 @@ class ROS1Backend(Backend):
             The dictionary default parameters are
 
             >>> {"namespace": "drone"                           # Namespace to append to the topics
-            >>>  "pub_pose": True,                              # Publish the pose of the vehicle
-            >>>  "pub_twist": True,                             # Publish the twist of the vehicle
-            >>>  "pub_twist_inertial": True,                    # Publish the twist of the vehicle in the inertial frame
-            >>>  "pub_accel": True,                             # Publish the acceleration of the vehicle
-            >>>  "pub_imu": True,                               # Publish the IMU data
-            >>>  "pub_mag": True,                               # Publish the magnetometer data
-            >>>  "pub_gps": True,                               # Publish the GPS data
-            >>>  "pub_gps_vel": True,                           # Publish the GPS velocity data
             >>>  "pose_topic": "state/pose",                    # Position and attitude of the vehicle in ENU
             >>>  "twist_topic": "state/twist",                  # Linear and angular velocities in the body frame of the vehicle
             >>>  "twist_inertial_topic": "state/twist_inertial" # Linear velocity of the vehicle in the inertial frame
             >>>  "accel_topic": "state/accel",                  # Linear acceleration of the vehicle in the inertial frame
+            >>>  "odom_topic": "state/odom",                    # Odometry of the vehicle from base_link frame to inertial frame
             >>>  "imu_topic": "sensors/imu",                    # IMU data
             >>>  "mag_topic": "sensors/mag",                    # Magnetometer data
             >>>  "gps_topic": "sensors/gps",                    # GPS data
@@ -73,9 +76,12 @@ class ROS1Backend(Backend):
             >>>  "pub_sensors": True,                           # Publish the sensors
             >>>  "pub_state": True,                             # Publish the state of the vehicle
             >>>  "pub_tf": False,                               # Publish the TF of the vehicle
-            >>>  "sub_control": True,                           # Subscribe to the control topics
-            >>>  "pub_clock": True,                             # Publish the clock topics
+            >>>  "pub_clock": True,                             # Publish the clock topics 
+            >>>  "sub_control": False,                           # Subscribe to the control topics
+            >>>  "pos_cmd_topic": "cmd/position",               # Position command
+            >>>  "result_file": None,                           # Result of controller for debug
         """
+        super().__init__(config=config)
 
         self.sim_app = sim_app
         if not rosgraph.is_master_online():
@@ -93,7 +99,7 @@ class ROS1Backend(Backend):
         self._pub_graphical_sensors = config.get("pub_graphical_sensors", True)
         self._pub_sensors = config.get("pub_sensors", True)
         self._pub_state = config.get("pub_state", True)
-        self._sub_control = config.get("sub_control", True)
+        self._sub_control = config.get("sub_control", False)
         self._pub_clock = config.get("pub_clock", False)
 
         # Check if the tf2_ros library is loaded and if the flag is set to True
@@ -103,12 +109,12 @@ class ROS1Backend(Backend):
         try:
             rospy.init_node("simulator_vehicle_" + str(vehicle_id),  disable_signals=True)
         except:
-            # If rclpy is already initialized, just ignore the exception
+            # If rospy is already initialized, just ignore the exception
             pass
 
         # Initialize the publishers and subscribers
         self.initialize_publishers(config)
-        self.initialize_subscribers()
+        self.initialize_subscribers(config)
 
         # Create a dictionary that will store the writers for the graphical sensors
         # NOTE: this is done this way, because the writers move data from the GPU->CPU and then publish it to ROS1
@@ -126,90 +132,52 @@ class ROS1Backend(Backend):
             # Initiliaze the static tf broadcaster for the sensors
             self.tf_static_broadcaster = tf2_ros.StaticTransformBroadcaster()
 
-            # Initialize the static tf broadcaster for the base_link transformation
-            self.send_static_transforms()
-
             # Initialize the dynamic tf broadcaster for the position of the body of the vehicle (base_link) with respect to the inertial frame (map - ENU) expressed in the inertil frame (map - ENU)
             self.tf_broadcaster = tf2_ros.TransformBroadcaster()
+        
+        if self._sub_control:
+            self.cmd = None
+            self.controller = trajController(results_file=config.get("result_file", None))
 
-    
     
     def initialize_publishers(self, config: dict):
-
         # ----------------------------------------------------- 
         # Create publishers for the state of the vehicle in ENU
         # -----------------------------------------------------
         if self._pub_state:
-            if config.get("pub_pose", True):
-                self.pose_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("pose_topic", "state/pose"), PoseStamped, queue_size=10)
-            
-            if config.get("pub_twist", True):
-                self.twist_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("twist_topic", "state/twist"), TwistStamped, queue_size=10)
-
-            if config.get("pub_twist_inertial", True):
-                self.twist_inertial_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("twist_inertial_topic", "state/twist_inertial"), TwistStamped, queue_size=10)
-
-            if config.get("pub_accel", True):
-                self.accel_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("accel_topic", "state/accel"), AccelStamped, queue_size=10)
-
+            self.pose_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("pose_topic", "state/pose"), PoseStamped, queue_size=50)
+            self.twist_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("twist_topic", "state/twist"), TwistStamped, queue_size=50)
+            self.twist_inertial_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("twist_inertial_topic", "state/twist_inertial"), TwistStamped, queue_size=50)
+            self.accel_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("accel_topic", "state/accel"), AccelStamped, queue_size=50)
+            self.odom_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("odom_topic", "state/odom"), Odometry, queue_size=50)
+        
         # -----------------------------------------------------
         # Create publishers for the sensors of the vehicle
         # -----------------------------------------------------
         if self._pub_sensors:
-            if config.get("pub_imu", True):
-                self.imu_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("imu_topic", "sensors/imu"), Imu, queue_size=1000)
-            
-            if config.get("pub_mag", True):
-                self.mag_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("mag_topic", "sensors/mag"), MagneticField, queue_size=1000)
-
-            if config.get("pub_gps", True):
-                self.gps_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("gps_topic", "sensors/gps"), NavSatFix, queue_size=1000)
-            
-            if config.get("pub_gps_vel", True):
-                self.gps_vel_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("gps_vel_topic", "sensors/gps_twist"), TwistStamped, queue_size=1000)
+            self.imu_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("imu_topic", "sensors/imu"), Imu, queue_size=50)
+            self.mag_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("mag_topic", "sensors/mag"), MagneticField, queue_size=50)
+            self.gps_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("gps_topic", "sensors/gps"), NavSatFix, queue_size=50)
+            self.gps_vel_pub = rospy.Publisher(self._namespace + str(self._id) + "/" + config.get("gps_vel_topic", "sensors/gps_twist"), TwistStamped, queue_size=50)
 
         if self._pub_clock:
             clock_topic = "clock"
             self.clock_pub = rospy.Publisher(clock_topic, Clock, queue_size=1000)
-            # try:
-            #     og.Controller.edit(
-            #         {"graph_path": "/ActionGraph", "evaluator_name": "execution"},
-            #         {
-            #             og.Controller.Keys.CREATE_NODES: [
-            #                 ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
-            #                 ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
-            #                 ("PublishClock", "isaacsim.ros1.bridge.ROS1PublishClock"),
-            #             ],
-            #             og.Controller.Keys.CONNECT: [
-            #                 # Connecting execution of OnPlaybackTick node to PublishClock  to automatically publish each frame
-            #                 ("OnPlaybackTick.outputs:tick", "PublishClock.inputs:execIn"),
-            #                 # Connecting simulationTime data of ReadSimTime to the clock publisher nodes
-            #                 ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
-            #             ],
-            #             og.Controller.Keys.SET_VALUES: [
-            #                 # Assigning topic names to clock publishers
-            #                 ("PublishClock.inputs:topicName", clock_topic),
-            #             ],
-            #         },
-            #     )
-            # except Exception as e:
-            #     print(e)
-            #     sim_app.close()
-            #     exit()
-
             rospy.set_param("/use_sim_time", True)
         
 
-    def initialize_subscribers(self):
-        
+    def initialize_subscribers(self, config: dict):
         if self._sub_control:
-            # Subscribe to vector of floats with the target angular velocities to control the vehicle
-            # This is not ideal, but we need to reach out to NVIDIA so that they can improve the ROS1 support with custom messages
-            # The current setup as it is.... its a pain!!!!
-            self.rotor_subs = []
-            for i in range(self._num_rotors):
-                self.rotor_subs.append(rospy.Subscriber(self._namespace + str(self._id) + "/control/rotor" + str(i) + "/ref", Float64, lambda x: self.rotor_callback(x, i),10), queue_size=1000)
+            self.pos_cmd_sub = rospy.Subscriber(self._namespace + str(self._id) + config.get("pos_cmd_topic", "/cmd/position"), PositionCommand, self.receive_position_cmd, queue_size=20)
 
+
+    def receive_position_cmd(self, cmd: PositionCommand):
+        l_cmd = [cmd.position,
+                 cmd.velocity,
+                 cmd.acceleration,
+                 cmd.jerk]
+        
+        self.cmd = [np.asarray([c.x, c.y, c.z]) for c in l_cmd] + [cmd.yaw, cmd.yaw_dot]
 
     def send_static_transforms(self):
         # Create the transformation from base_link FLU (ROS standard) to base_link FRD (standard in airborn and marine vehicles)
@@ -246,6 +214,44 @@ class ROS1Backend(Backend):
 
         self.tf_static_broadcaster.sendTransform(t)
 
+        if self.vehicle != None:
+            body_prim = prims_utils.get_prim_at_path(self.vehicle._stage_prefix + "/body")
+            rotors_prim_path = prims_utils.find_matching_prim_paths(self.vehicle._stage_prefix + "/rotor*")
+            
+            graphical_sensors_prim_path = list()
+            for e in self.vehicle._graphical_sensors:
+                graphical_sensors_prim_path.append(e._stage_prim_path)
+            
+            for e in (rotors_prim_path + graphical_sensors_prim_path):
+                trans_matrix = transformations_utils.get_relative_transform(prims_utils.get_prim_at_path(e), body_prim)
+                trans, rot_q = transformations_utils.pose_from_tf_matrix(trans_matrix)
+
+                t = TransformStamped()
+                t.header.stamp = rospy.Time.now()
+                t.header.frame_id = self._namespace + '_' + "base_link"
+                t.child_frame_id = e.rpartition("/")[-1]
+                t.transform.translation.x = trans[0]
+                t.transform.translation.y = trans[1]
+                t.transform.translation.z = trans[2]
+                t.transform.rotation.x = rot_q[1]
+                t.transform.rotation.y = rot_q[2]
+                t.transform.rotation.z = rot_q[3]
+                t.transform.rotation.w = rot_q[0]
+
+                self.tf_static_broadcaster.sendTransform(t)
+
+                if t.child_frame_id.startswith('camera'):
+                    rot_q = R.from_quat([rot_q[1], rot_q[2], rot_q[3], rot_q[0]])
+                    rot_q *= R.from_euler('xyz', [180, 0, 0], degrees=True)
+                    rot_q = rot_q.as_quat()
+                    t.child_frame_id += '_ros'
+                    t.transform.rotation.x = rot_q[0]
+                    t.transform.rotation.y = rot_q[1]
+                    t.transform.rotation.z = rot_q[2]
+                    t.transform.rotation.w = rot_q[3]
+
+                    self.tf_static_broadcaster.sendTransform(t)
+
     def update_state(self, state):
         """
         Method that when implemented, should handle the receivel of the state of the vehicle using this callback
@@ -253,6 +259,9 @@ class ROS1Backend(Backend):
 
         if self._pub_clock:
             self.clock_pub.publish(rospy.Time.from_sec(self.pg.world.current_time))
+
+        if self._sub_control:
+            self.controller.update_state(state)
 
         # Publish the state of the vehicle only if the flag is set to True
         if not self._pub_state:
@@ -262,17 +271,21 @@ class ROS1Backend(Backend):
         twist = TwistStamped()
         twist_inertial = TwistStamped()
         accel = AccelStamped()
+        odom = Odometry()
 
         # Update the header
         pose.header.stamp = rospy.Time.now()
         twist.header.stamp = pose.header.stamp
         twist_inertial.header.stamp = pose.header.stamp
         accel.header.stamp = pose.header.stamp
+        odom.header.stamp = pose.header.stamp
 
         pose.header.frame_id = "map"
         twist.header.frame_id = self._namespace + "_" + "base_link"
         twist_inertial.header.frame_id = "map"
         accel.header.frame_id = "map"
+        odom.header.frame_id = "map"
+        odom.child_frame_id = self._namespace + "_" + "base_link"
 
         # Fill the position and attitude of the vehicle in ENU
         pose.pose.position.x = state.position[0]
@@ -303,12 +316,16 @@ class ROS1Backend(Backend):
         accel.accel.linear.y = state.linear_acceleration[1]
         accel.accel.linear.z = state.linear_acceleration[2]
 
+        odom.pose.pose = pose.pose
+        odom.twist.twist = twist_inertial.twist
+
         # Publish the messages containing the state of the vehicle
         self.pose_pub.publish(pose)
         self.twist_pub.publish(twist)
         self.twist_inertial_pub.publish(twist_inertial)
         self.accel_pub.publish(accel)
-        
+        self.odom_pub.publish(odom)
+
         # Update the dynamic tf broadcaster with the current position of the vehicle in the inertial frame
         if self._pub_tf:
             t = TransformStamped()
@@ -323,6 +340,8 @@ class ROS1Backend(Backend):
             t.transform.rotation.z = state.attitude[2]
             t.transform.rotation.w = state.attitude[3]
             self.tf_broadcaster.sendTransform(t)
+
+            self.send_static_transforms()
 
     def rotor_callback(self, ros_msg: Float64, rotor_id):
         # Update the reference for the rotor of the vehicle
@@ -519,6 +538,7 @@ class ROS1Backend(Backend):
             A list with the target angular velocities for each individual rotor of the vehicle
         """
         # return self.input_ref
+        return self.input_ref
 
     def update(self, dt: float):
         """
@@ -526,10 +546,11 @@ class ROS1Backend(Backend):
         from the communication interface. This method will be called by the simulation on every physics step
         """
 
-        # In this case, do nothing as we are sending messages as soon as new data arrives from the sensors and state
-        # and updating the reference for the thrusters as soon as receiving from ROS1 topics
-        # Just poll for new ROS1 messages in a non-blocking way
-        # rospy.spinOnce()
+        if self._sub_control:
+            f, torques = self.controller.update(dt, self.cmd)
+            if self.vehicle:
+                self.input_ref = self.vehicle.force_and_torques_to_velocities(f, torques)
+
 
     def start(self):
         """
@@ -537,13 +558,20 @@ class ROS1Backend(Backend):
         """
         # Reset the reference for the thrusters
         self.input_ref = [0.0 for i in range(self._num_rotors)]
+        
+        if self._sub_control:
+            self.controller.start()
 
     def stop(self):
         """
         Method that when implemented should handle the stopping of the simulation of vehicle
         """
         # Reset the reference for the thrusters
+        self.cmd = None
         self.input_ref = [0.0 for i in range(self._num_rotors)]
+
+        if self._sub_control:
+            self.controller.stop()
 
     def reset(self):
         """
@@ -551,3 +579,6 @@ class ROS1Backend(Backend):
         """
         # Reset the reference for the thrusters
         self.input_ref = [0.0 for i in range(self._num_rotors)]
+
+        if self._sub_control:
+            self.controller.reset()
