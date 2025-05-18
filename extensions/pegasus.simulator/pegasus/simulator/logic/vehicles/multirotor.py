@@ -67,6 +67,7 @@ class Multirotor(Vehicle):
         # Spawning pose of the vehicle
         init_pos=[0.0, 0.0, 0.07],
         init_orientation=[0.0, 0.0, 0.0, 1.0],
+        collision_check=False,
         config=MultirotorConfig(),
     ):
         """Initializes the multirotor object
@@ -81,7 +82,9 @@ class Multirotor(Vehicle):
         """
 
         # 1. Initiate the Vehicle object itself
-        super().__init__(stage_prefix, usd_file, init_pos, init_orientation, config.sensors, config.graphical_sensors, config.graphs, config.backends)
+        super().__init__(stage_prefix, usd_file, init_pos, init_orientation,
+                         config.sensors, config.graphical_sensors,
+                         config.graphs, config.backends, collision_check=collision_check)
 
         # 2. Setup the dynamics of the system - get the thrust curve of the vehicle from the configuration
         self._thrusters = config.thrust_curve
@@ -139,6 +142,13 @@ class Multirotor(Vehicle):
         # Call the update methods in all backends
         for backend in self._backends:
             backend.update(dt)
+        
+        is_contact, value = self.in_contact()
+        if is_contact:
+            print(value)
+            for contact in value['contacts']:
+                print(f" Contact: {contact['body0']} <--> {contact['body1']}")
+            print("\r\n")
 
     def handle_propeller_visual(self, rotor_number, force: float, articulation):
         """

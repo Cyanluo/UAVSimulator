@@ -15,10 +15,12 @@ from pxr import Usd, Gf
 
 # High level Isaac sim APIs
 import omni.usd
-from omni.isaac.core.utils.prims import define_prim, get_prim_at_path
+from omni.isaac.core.utils.prims import define_prim, get_prim_at_path, get_prim_path
 from omni.usd import get_stage_next_free_path
 from isaacsim.core.api.robots import Robot
 from omni.isaac.dynamic_control import _dynamic_control
+from isaacsim.sensors.physics import ContactSensor
+from pxr import Usd, UsdPhysics, PhysxSchema
 
 # Extension APIs
 from pegasus.simulator.logic.state import State
@@ -54,7 +56,8 @@ class Vehicle(Robot):
         sensors=[],
         graphical_sensors=[],
         graphs=[],
-        backends=[]
+        backends=[],
+        collision_check=False
     ):
         """
         Class that initializes a vehicle in the isaac sim's curent stage
@@ -164,6 +167,9 @@ class Vehicle(Robot):
         # Add a callbacks for the
         self._world.add_physics_callback(self._stage_prefix + "/mav_state", self.update_sim_state)
 
+        self._contact_seneors = list()
+        if collision_check:
+            self.enable_contact_for_robot(self._stage_prefix)
 
     def __del__(self):
         """
@@ -333,6 +339,43 @@ class Vehicle(Robot):
         # The acceleration of the vehicle expressed in the inertial frame X_ddot = [x_ddot, y_ddot, z_ddot]
         self._state.linear_acceleration = linear_acceleration
 
+    def enable_contact_for_robot(self, robot_root_path: str):
+        stage = omni.usd.get_context().get_stage()
+        count = 0
+        for prim in stage.Traverse():
+            if not str(prim.GetPath()).startswith(robot_root_path):
+                continue
+
+            # 判断是否为具有刚体或碰撞功能的 prim
+            rigid_api = UsdPhysics.RigidBodyAPI.Get(stage, prim.GetPath())
+            collision_api = PhysxSchema.PhysxCollisionAPI.Get(stage, prim.GetPath())
+            has_rigidbody = rigid_api and rigid_api.GetPrim().IsValid()
+            has_collision = collision_api and collision_api.GetPrim().IsValid()
+
+            if has_rigidbody or has_collision:
+                # 检查是否已应用 ContactReportAPI
+                contact_api = PhysxSchema.PhysxContactReportAPI.Get(stage, prim.GetPath())
+                has_contact = contact_api and contact_api.GetPrim().IsValid()
+
+                if not has_contact:
+                    print("Add contact sensor to: ", get_prim_path(prim))
+                    sensor = ContactSensor(
+                            prim_path=get_prim_path(prim)+"/Contact_Sensor",
+                            name="Contact_Sensor",
+                            frequency=60,
+                            translation=np.array([0, 0, 0]),
+                            min_threshold=0,
+                            max_threshold=10000000,
+                            radius=-1
+                        )
+                    sensor.get_current_frame()
+                    sensor.add_raw_contact_data_to_frame()
+                    sensor.initialize()
+                    self._contact_seneors.append(sensor)
+                    count += 1
+
+        print(f"Applied PhysxContact to {count} prims under {robot_root_path}")
+
     def start(self):
         """
         Method that should be implemented by the class that inherits the vehicle object.
@@ -411,3 +454,11 @@ class Vehicle(Robot):
             self._vehicle_dc_interface = _dynamic_control.acquire_dynamic_control_interface()
 
         return self._vehicle_dc_interface
+
+    def in_contact(self):
+        for sensor in self._contact_seneors:
+            value = sensor.get_current_frame()
+            if('in_contact' in value and value['in_contact']):
+                return True, value
+        
+        return False, None

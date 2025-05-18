@@ -14,19 +14,18 @@ from isaacsim import SimulationApp
 # Start Isaac Sim's simulation environment
 # Note: this simulation app must be instantiated right after the SimulationApp import, otherwise the simulator will crash
 # as this is the object that will load all the extensions and load the actual simulator.
-simulation_app = SimulationApp({"headless": True})
+simulation_app = SimulationApp({"headless": False})
 
 # -----------------------------------
 # The actual script should start here
 # -----------------------------------
+import omni
 import omni.timeline
 from omni.isaac.core.world import World
 
 # Import the Pegasus API for simulating drones
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 from pegasus.simulator.logic.graphical_sensors.monocular_camera import MonocularCamera
-from pegasus.simulator.logic.graphical_sensors.lidar import Lidar
-from pegasus.simulator.logic.backends.px4_mavlink_backend import PX4MavlinkBackend, PX4MavlinkBackendConfig
 from pegasus.simulator.logic.backends.ros1_backend import ROS1Backend
 from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorConfig
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
@@ -34,12 +33,6 @@ from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 # Auxiliary scipy and numpy modules
 from scipy.spatial.transform import Rotation
 
-# Import the custom python control backend
-import sys, os
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)) + '/utils')
-
-# Use pathlib for parsing the desired trajectory from a CSV file
-from pathlib import Path
 
 class PegasusApp:
     """
@@ -64,9 +57,6 @@ class PegasusApp:
 
         # Launch one of the worlds provided by NVIDIA
         self.pg.load_environment(SIMULATION_ENVIRONMENTS["Warehouse"])
-
-        # Get the current directory used to read trajectories and save results
-        self.curr_dir = str(Path(os.path.dirname(os.path.realpath(__file__))).resolve())
 
         from omni.isaac.core.objects import DynamicCuboid
         import numpy as np
@@ -95,12 +85,6 @@ class PegasusApp:
         # Create the vehicle
         # Try to spawn the selected robot in the world to the specified namespace
         config_multirotor = MultirotorConfig()
-        # # Create the multirotor configuration
-        # mavlink_config = PX4MavlinkBackendConfig({
-        #     "vehicle_id": 0,
-        #     "px4_autolaunch": True,
-        #     "px4_dir": "/home/marcelo/PX4-Autopilot"
-        # })
         config_multirotor.backends = [
             ROS1Backend(vehicle_id=1, 
                         sim_app= simulation_app,
@@ -123,8 +107,9 @@ class PegasusApp:
             [0.0, 0.0, 0.07],
             Rotation.from_euler("XYZ", [0.0, 0.0, 0.0], degrees=True).as_quat(),
             config=config_multirotor,
+            collision_check=True
         )
-
+    
         # Reset the simulation environment so that all articulations (aka robots) are initialized
         self.world.reset()
 
