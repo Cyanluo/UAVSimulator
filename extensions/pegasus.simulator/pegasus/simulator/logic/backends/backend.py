@@ -58,6 +58,11 @@ class Backend(ABC):
         """
         self._vehicle = vehicle
 
+    def take_off(self, height):
+        return False
+    
+    def hold(self):
+        pass
     
     @abstractmethod
     def update_sensor(self, sensor_type: str, data):

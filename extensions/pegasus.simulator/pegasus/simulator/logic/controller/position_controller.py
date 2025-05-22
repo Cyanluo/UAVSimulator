@@ -23,7 +23,7 @@ class trajController:
         results_file: str=None, 
         Kp=[10.0, 10.0, 10.0],
         Kd=[8.5, 8.5, 8.5],
-        Ki=[1.50, 1.50, 1.50],
+        Ki=[1.5, 1.5, 1.5],
         Kr=[3.5, 3.5, 3.5],
         Kw=[0.5, 0.5, 0.5]):
 
@@ -67,6 +67,7 @@ class trajController:
 
     def reset(self):
         self.stop()
+        self.start()
 
     def start(self):
         """
@@ -134,7 +135,7 @@ class trajController:
         
         # -------------------------------------------------
         # Start the controller implementation
-        # -------------------------------------------------
+        # ------------------------------------------------
 
         # Compute the tracking errors
         ep = self.p - p_ref

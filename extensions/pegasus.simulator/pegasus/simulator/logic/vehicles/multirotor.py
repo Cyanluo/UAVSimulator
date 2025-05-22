@@ -7,8 +7,6 @@
 
 import numpy as np
 
-from omni.isaac.dynamic_control import _dynamic_control
-
 # The vehicle interface
 from pegasus.simulator.logic.vehicles.vehicle import Vehicle
 
@@ -19,6 +17,7 @@ from pegasus.simulator.logic.backends.px4_mavlink_backend import PX4MavlinkBacke
 from pegasus.simulator.logic.dynamics import LinearDrag
 from pegasus.simulator.logic.thrusters import QuadraticThrustCurve
 from pegasus.simulator.logic.sensors import Barometer, IMU, Magnetometer, GPS
+from pegasus.simulator.logic.interface.pegasus_interface import MultirotorState
 
 class MultirotorConfig:
     """
@@ -90,6 +89,13 @@ class Multirotor(Vehicle):
         self._thrusters = config.thrust_curve
         self._drag = config.drag
 
+        # vehicle state: 0:land  1:flying  2:collision
+        self._vehicle_state = MultirotorState.LAND
+
+    @property
+    def vehicle_state(self):
+        return self._vehicle_state
+
     def start(self):
         """In this case we do not need to do anything extra when the simulation starts"""
         pass
@@ -106,7 +112,15 @@ class Multirotor(Vehicle):
 
         Args:
             dt (float): The time elapsed between the previous and current function calls (s).
-        """
+           """
+
+        if self._vehicle_state == MultirotorState.LAND:
+            self.take_off(1.0)
+
+        if self._vehicle_state == MultirotorState.TAKE_OFF:
+            if self._state.position[2] > (self._target_take_off_height-0.01):
+                self._backends[0].hold()
+                self._vehicle_state = MultirotorState.FLYING
 
         # Get the articulation root of the vehicle
         articulation = self.get_dc_interface().get_articulation(self._stage_prefix)
@@ -142,13 +156,19 @@ class Multirotor(Vehicle):
         # Call the update methods in all backends
         for backend in self._backends:
             backend.update(dt)
-        
+
         is_contact, value = self.in_contact()
-        if is_contact:
+        if is_contact and (self._vehicle_state == MultirotorState.FLYING or self._vehicle_state == MultirotorState.COLLISION):
+            self._vehicle_state = MultirotorState.COLLISION
             print(value)
             for contact in value['contacts']:
                 print(f" Contact: {contact['body0']} <--> {contact['body1']}")
             print("\r\n")
+            self.reset()
+
+    def reset(self):
+        self._vehicle_state = MultirotorState.LAND
+        super().reset()
 
     def handle_propeller_visual(self, rotor_number, force: float, articulation):
         """
@@ -236,3 +256,9 @@ class Multirotor(Vehicle):
         ang_vel = np.sqrt(squared_ang_vel)
 
         return ang_vel
+
+    def take_off(self, height):
+        if len(self._backends) != 0:
+            if self._backends[0].take_off(height):
+                self._target_take_off_height = height
+                self._vehicle_state = MultirotorState.TAKE_OFF

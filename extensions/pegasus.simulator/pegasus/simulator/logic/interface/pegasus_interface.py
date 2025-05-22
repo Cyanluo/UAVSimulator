@@ -27,6 +27,13 @@ from pegasus.simulator.params import DEFAULT_WORLD_SETTINGS, SIMULATION_ENVIRONM
 from pegasus.simulator.logic.vehicle_manager import VehicleManager
 
 
+from enum import Enum
+class MultirotorState(Enum):
+    LAND = 0
+    TAKE_OFF = 1
+    FLYING = 2
+    COLLISION = 3
+
 class PegasusInterface:
     """
     PegasusInterface is a singleton class (there is only one object instance at any given time) that will be used
@@ -295,6 +302,8 @@ class PegasusInterface:
             usd_path (str): The path where the USD file describing the world is located.
             force_clear (bool): Whether to perform a clear before loading the asset. Defaults to False.
         """
+        print("load_environment")
+        print(usd_path)
         asyncio.ensure_future(self.load_environment_async(usd_path, force_clear))
 
     def load_nvidia_environment(self, environment_asset: str = "Hospital/hospital.usd"):

@@ -22,6 +22,8 @@ simulation_app = SimulationApp({"headless": False})
 import omni
 import omni.timeline
 from omni.isaac.core.world import World
+import omni.usd
+from pxr import UsdLux, Gf
 
 # Import the Pegasus API for simulating drones
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
@@ -32,7 +34,6 @@ from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 
 # Auxiliary scipy and numpy modules
 from scipy.spatial.transform import Rotation
-
 
 class PegasusApp:
     """
@@ -56,7 +57,14 @@ class PegasusApp:
         self.world = self.pg.world
 
         # Launch one of the worlds provided by NVIDIA
-        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Warehouse"])
+        self.pg.load_environment(SIMULATION_ENVIRONMENTS["Default Environment"])
+
+        # DomeLight
+        stage = omni.usd.get_context().get_stage()
+        light_path = "/World/DomeLight"
+        domeLight = UsdLux.DomeLight.Define(stage, light_path)
+        domeLight.CreateIntensityAttr(1000)
+        domeLight.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
 
         from omni.isaac.core.objects import DynamicCuboid
         import numpy as np
@@ -94,7 +102,7 @@ class PegasusApp:
                             "pub_graphical_sensors": True,
                             "pub_state": True,
                             "sub_control": True,
-                            "pub_tf": True,
+                            "pub_tf": False,
                             "pub_clock": True})]
 
         # Create a camera and lidar sensors

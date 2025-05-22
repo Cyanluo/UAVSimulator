@@ -399,6 +399,11 @@ class Vehicle(Robot):
         """
         pass
 
+    def reset(self):
+        for backend in self._backends:
+                backend.reset()
+        self.post_reset()
+
     def update_sensors(self, dt: float):
         """Callback that is called at every physics steps and will call the sensor.update method to generate new
         sensor data. For each data that the sensor generates, the backend.update_sensor method will also be called for

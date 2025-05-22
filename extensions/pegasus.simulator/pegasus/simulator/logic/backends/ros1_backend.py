@@ -19,7 +19,7 @@ from sensor_msgs.msg import Imu, MagneticField, NavSatFix, NavSatStatus
 from geometry_msgs.msg import PoseStamped, TwistStamped, AccelStamped
 from rosgraph_msgs.msg import Clock
 from nav_msgs.msg import Odometry
-from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
+from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface, MultirotorState
 
 # TF imports
 # Check if these libraries exist in the system
@@ -135,6 +135,8 @@ class ROS1Backend(Backend):
             # Initialize the dynamic tf broadcaster for the position of the body of the vehicle (base_link) with respect to the inertial frame (map - ENU) expressed in the inertil frame (map - ENU)
             self.tf_broadcaster = tf2_ros.TransformBroadcaster()
         
+        self.state = None
+
         if self._sub_control:
             self.cmd = None
             self.controller = trajController(results_file=config.get("result_file", None))
@@ -178,6 +180,19 @@ class ROS1Backend(Backend):
                  cmd.jerk]
         
         self.cmd = [np.asarray([c.x, c.y, c.z]) for c in l_cmd] + [cmd.yaw, cmd.yaw_dot]
+
+    def take_off(self, height):
+        if self.vehicle.vehicle_state == MultirotorState.LAND and self.state is not None:
+            self.cmd = [np.asarray([self.state.position[0], self.state.position[1], height]),
+                        np.asarray([0, 0, 0.5]), np.asarray([0, 0, 0]),
+                        np.asarray([0, 0, 0]), R.from_quat(self.state.attitude).as_euler("ZYX")[0], 0.1]
+            return True
+        return False
+
+    def hold(self):
+        self.cmd = [np.asarray([self.state.position[0], self.state.position[1], self.state.position[2]]),
+                    np.asarray([0, 0, 0]), np.asarray([0, 0, 0]),
+                    np.asarray([0, 0, 0]), R.from_quat(self.state.attitude).as_euler("ZYX")[0], 0]
 
     def send_static_transforms(self):
         # Create the transformation from base_link FLU (ROS standard) to base_link FRD (standard in airborn and marine vehicles)
@@ -256,6 +271,7 @@ class ROS1Backend(Backend):
         """
         Method that when implemented, should handle the receivel of the state of the vehicle using this callback
         """
+        self.state = state
 
         if self._pub_clock:
             self.clock_pub.publish(rospy.Time.from_sec(self.pg.world.current_time))
@@ -578,6 +594,7 @@ class ROS1Backend(Backend):
         Method that when implemented, should handle the reset of the vehicle simulation to its original state
         """
         # Reset the reference for the thrusters
+        self.cmd = None
         self.input_ref = [0.0 for i in range(self._num_rotors)]
 
         if self._sub_control:
