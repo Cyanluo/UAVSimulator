@@ -55,7 +55,7 @@ class MonocularCamera(GraphicalSensor):
 
         # Configurations of the camera
         self._depth = config.get("depth", True)
-        self._position = config.get("position", np.array([0.30, 0.0, 0.0]))
+        self._position = config.get("position", np.array([0.15, 0.0, 0.0]))
         self._orientation = config.get("orientation", np.array([0.0, 0.0, 180.0]))
         self._resolution = config.get("resolution", (1920, 1200))
         self._frequency = config.get("frequency", 30)

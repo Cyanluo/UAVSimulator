@@ -35,6 +35,10 @@ from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 # Auxiliary scipy and numpy modules
 from scipy.spatial.transform import Rotation
 
+from isaaclab.terrains import TerrainImporterCfg, TerrainGeneratorCfg, HfDiscreteObstaclesTerrainCfg, TerrainImporter
+
+import numpy as np
+
 class PegasusApp:
     """
     A Template class that serves as an example on how to build a simple Isaac Sim standalone App.
@@ -66,29 +70,42 @@ class PegasusApp:
         domeLight.CreateIntensityAttr(1000)
         domeLight.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
 
-        from omni.isaac.core.objects import DynamicCuboid
-        import numpy as np
-        cube_2 = self.world.scene.add(
-            DynamicCuboid(
-                prim_path="/new_cube_2",
-                name="cube_1",
-                position=np.array([-3.0, 0, 2.0]),
-                scale=np.array([1.0, 1.0, 1.5]),
-                size=1.0,
-                color=np.array([255, 0, 0]),
-            )
+        self.map_range = [20.0, 20.0, 4.5]
+        terrain_cfg = TerrainImporterCfg(
+            num_envs=1,
+            env_spacing=0.0,
+            prim_path="/World/ground",
+            terrain_type="generator",
+            terrain_generator=TerrainGeneratorCfg(
+                seed=0,
+                size=(self.map_range[0]*2, self.map_range[1]*2), 
+                border_width=5.0,
+                num_rows=1, 
+                num_cols=1, 
+                horizontal_scale=0.1,
+                vertical_scale=0.1,
+                slope_threshold=0.75,
+                use_cache=False,
+                color_scheme="height",
+                sub_terrains={
+                    "obstacles": HfDiscreteObstaclesTerrainCfg(
+                        horizontal_scale=0.1,
+                        vertical_scale=0.1,
+                        border_width=0.0,
+                        num_obstacles=100,
+                        obstacle_height_mode="choice",
+                        obstacle_width_range=(0.4, 1.1),
+                        obstacle_height_range=[1.5, 4.5],
+                        platform_width=0.0,
+                    ),
+                },
+            ),
+            visual_material = None,
+            max_init_terrain_level=None,
+            collision_group=-1,
+            debug_vis=False,
         )
-
-        cube_3 = self.world.scene.add(
-            DynamicCuboid(
-                prim_path="/new_cube_3",
-                name="cube_2",
-                position=np.array([-1.9, 1.3, 2.0]),
-                scale=np.array([1.0, 1.0, 1.0]),
-                size=1.0,
-                color=np.array([255, 0, 0]),
-            )
-        )
+        terrain_importer = TerrainImporter(terrain_cfg)
 
         # Create the vehicle
         # Try to spawn the selected robot in the world to the specified namespace
