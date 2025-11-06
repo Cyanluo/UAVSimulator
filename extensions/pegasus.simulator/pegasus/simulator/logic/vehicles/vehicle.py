@@ -21,6 +21,7 @@ from isaacsim.core.api.robots import Robot
 from omni.isaac.dynamic_control import _dynamic_control
 from isaacsim.sensors.physics import ContactSensor
 from pxr import Usd, UsdPhysics, PhysxSchema
+from isaacsim.core.utils.types import ArticulationAction
 
 # Extension APIs
 from pegasus.simulator.logic.state import State
@@ -57,7 +58,8 @@ class Vehicle(Robot):
         graphical_sensors=[],
         graphs=[],
         backends=[],
-        collision_check=False
+        collision_check=False,
+        base_name="/body"
     ):
         """
         Class that initializes a vehicle in the isaac sim's curent stage
@@ -98,6 +100,7 @@ class Vehicle(Robot):
         )
 
         self._vehicle_dc_interface = None
+        self._base_name = base_name
 
         # Add this object for the world to track, so that if we clear the world, this object is deleted from memory and
         # as a consequence, from the VehicleManager as well
@@ -285,6 +288,20 @@ class Vehicle(Robot):
         # Apply the torque to the rigidbody. The torque should be expressed in the rigidbody frame
         self.get_dc_interface().apply_body_torque(rb, carb._carb.Float3(torque), False)
 
+    def set_joints_position_targets(self, pos, joint_names):
+        action = ArticulationAction(joint_positions=np.array(pos), joint_indices=np.array([self.get_dof_index(e) for e in joint_names]))
+        self.apply_action(action)
+    
+    def set_joints_velocity_targets(self, vel, joint_names):
+        action = ArticulationAction(joint_velocities=np.array(vel), joint_indices=np.array([self.get_dof_index(e) for e in joint_names]))
+        self.apply_action(action)
+    
+    def set_joints_position(self, pos, joint_names):
+        self.set_joint_positions(np.array(pos), joint_indices=np.array([self.get_dof_index(e) for e in joint_names]))
+    
+    def set_joints_velocity(self, vel, joint_names):
+        self.set_joint_velocities(np.array(vel), joint_indices=np.array([self.get_dof_index(e) for e in joint_names]))
+
     def update_state(self, dt: float):
         """
         Method that is called at every physics step to retrieve and update the current state of the vehicle, i.e., get
@@ -295,13 +312,13 @@ class Vehicle(Robot):
         """
 
         # Get the body frame interface of the vehicle (this will be the frame used to get the position, orientation, etc.)
-        body = self.get_dc_interface().get_rigid_body(self._stage_prefix + "/body")
+        body = self.get_dc_interface().get_rigid_body(self._stage_prefix + self._base_name)
 
         # Get the current position and orientation in the inertial frame
         pose = self.get_dc_interface().get_rigid_body_pose(body)
 
         # Get the attitude according to the convention [w, x, y, z]
-        prim = self._world.stage.GetPrimAtPath(self._stage_prefix + "/body")
+        prim = self._world.stage.GetPrimAtPath(self._stage_prefix + self._base_name)
         rotation_quat = get_world_transform_xform(prim).GetQuaternion()
         rotation_quat_real = rotation_quat.GetReal()
         rotation_quat_img = rotation_quat.GetImaginary()

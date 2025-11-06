@@ -122,9 +122,6 @@ class Multirotor(Vehicle):
                 self._backends[0].hold()
                 self._vehicle_state = MultirotorState.FLYING
 
-        # Get the articulation root of the vehicle
-        articulation = self.get_dc_interface().get_articulation(self._stage_prefix)
-
         # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
         if len(self._backends) != 0:
             desired_rotor_velocities = self._backends[0].input_reference()
@@ -143,11 +140,11 @@ class Multirotor(Vehicle):
             # Apply the force in Z on the rotor frame
             self.apply_force([0.0, 0.0, forces_z[i]], body_part="/rotor" + str(i))
 
-            # Generate the rotating propeller visual effect
-            self.handle_propeller_visual(i, forces_z[i], articulation)
+            # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
+            self.apply_torque([0.0, 0.0, rolling_moment[i]], body_part="/body")
 
-        # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
-        self.apply_torque([0.0, 0.0, rolling_moment], "/body")
+            # Generate the rotating propeller visual effect
+            self.handle_propeller_visual(i, forces_z[i])
 
         # Compute the total linear drag force to apply to the vehicle's body frame
         drag = self._drag.update(self._state, dt)
@@ -170,7 +167,7 @@ class Multirotor(Vehicle):
         self._vehicle_state = MultirotorState.LAND
         super().reset()
 
-    def handle_propeller_visual(self, rotor_number, force: float, articulation):
+    def handle_propeller_visual(self, rotor_number, force: float):
         """
         Auxiliar method used to set the joint velocity of each rotor (for animation purposes) based on the 
         amount of force being applied on each joint
@@ -181,18 +178,15 @@ class Multirotor(Vehicle):
             articulation (_type_): The articulation group the joints of the rotors belong to
         """
 
-        # Rotate the joint to yield the visual of a rotor spinning (for animation purposes only)
-        joint = self.get_dc_interface().find_articulation_dof(articulation, "joint" + str(rotor_number))
-
         # Spinning when armed but not applying force
         if 0.0 < force < 0.1:
-            self.get_dc_interface().set_dof_velocity(joint, 5 * self._thrusters.rot_dir[rotor_number])
+            self.set_joints_velocity([5 * self._thrusters.rot_dir[rotor_number]], ["joint" + str(rotor_number)])
         # Spinning when armed and applying force
         elif 0.1 <= force:
-            self.get_dc_interface().set_dof_velocity(joint, 100 * self._thrusters.rot_dir[rotor_number])
+            self.set_joints_velocity([100 * self._thrusters.rot_dir[rotor_number]], ["joint" + str(rotor_number)])
         # Not spinning
         else:
-            self.get_dc_interface().set_dof_velocity(joint, 0)
+            self.set_joints_velocity([0], ["joint" + str(rotor_number)])
 
     def force_and_torques_to_velocities(self, force: float, torque: np.ndarray):
         """
@@ -230,7 +224,7 @@ class Multirotor(Vehicle):
         aloc_matrix[2, :] = np.array([-relative_poses[i].p[0] * self._thrusters._rotor_constant[i] for i in range(self._thrusters._num_rotors)])
 
         # Define the forth line of the matrix (\tau_z [Nm])
-        aloc_matrix[3, :] = np.array([self._thrusters._rolling_moment_coefficient[i] * self._thrusters._rot_dir[i] for i in range(self._thrusters._num_rotors)])
+        aloc_matrix[3, :] = np.array([-self._thrusters._rolling_moment_coefficient[i] * self._thrusters._rot_dir[i] for i in range(self._thrusters._num_rotors)])
 
         # Compute the inverse allocation matrix, so that we can get the angular velocities (squared) from the total thrust and torques
         aloc_inv = np.linalg.pinv(aloc_matrix)

@@ -60,8 +60,8 @@ class QuadraticThrustCurve(ThrustCurve):
         # The actual force that each rotor is generating
         self._force = [0.0 for i in range(self._num_rotors)]
 
-        # The actual rolling moment that is generated on the body frame of the vehicle
-        self._rolling_moment = 0.0
+        # The actual moment that each rotor is generating
+        self._rolling_moment = [0.0 for i in range(self._num_rotors)]
 
     def set_input_reference(self, input_reference):
         """
@@ -82,8 +82,6 @@ class QuadraticThrustCurve(ThrustCurve):
             dt (float): The time elapsed between the previous and current function calls (s).
         """
 
-        rolling_moment = 0.0
-
         # Compute the actual force to apply to the rotors and the rolling moment contribution
         for i in range(self._num_rotors):
 
@@ -97,10 +95,7 @@ class QuadraticThrustCurve(ThrustCurve):
             self._force[i] = self._rotor_constant[i] * np.power(self._velocity[i], 2)
 
             # Compute the rolling moment coefficient
-            rolling_moment += self._rolling_moment_coefficient[i] * np.power(self._velocity[i], 2.0) * self._rot_dir[i]
-
-        # Update the rolling moment variable
-        self._rolling_moment = rolling_moment
+            self._rolling_moment[i] = -1 * self._rolling_moment_coefficient[i] * np.power(self._velocity[i], 2.0) * self._rot_dir[i]
 
         # Return the forces and velocities on each rotor and total torque applied on the body frame
         return self._force, self._velocity, self._rolling_moment
