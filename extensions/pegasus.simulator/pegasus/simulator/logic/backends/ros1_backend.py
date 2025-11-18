@@ -30,12 +30,10 @@ except ImportError:
     carb.log_warn("TF2 ROS not installed. Will not publish TFs with the ROS1 backend")
     tf2_ros_loaded = False
 
-import isaacsim.core.utils.prims as prims_utils
-import isaacsim.core.utils.transformations as transformations_utils
 from scipy.spatial.transform import Rotation as R
 
 from pegasus.simulator.logic.backends.backend import Backend
-from pegasus.simulator.logic.controller.position_controller import trajController
+from pegasus.simulator.logic.controller.controller import Controller
 
 # Import the replicatore core module used for writing graphical data to ROS 2
 import omni
@@ -52,11 +50,10 @@ from quadrotor_msgs.msg import PositionCommand
 
 class ROS1Backend(Backend):
 
-    def __init__(self, sim_app, vehicle_id: int, num_rotors=4, config: dict = {}):
+    def __init__(self, sim_app, vehicle_id: int, num_rotors=4, config: dict = {}, controller = Controller()):
         """Initialize the ROS1 Camera class
 
         Args:
-            camera_prim_path (str): Path to the camera prim. Global path when it starts with `/`, else local to vehicle prim path
             config (dict): A Dictionary that contains all the parameters for configuring the ROS1Camera - it can be empty or only have some of the parameters used by the ROS1Camera.
 
         Examples:
@@ -80,6 +77,7 @@ class ROS1Backend(Backend):
             >>>  "sub_control": False,                           # Subscribe to the control topics
             >>>  "pos_cmd_topic": "cmd/position",               # Position command
             >>>  "result_file": None,                           # Result of controller for debug
+            >>>  "controller": Controller,                    # position controller
         """
         super().__init__(config=config)
 
@@ -120,9 +118,10 @@ class ROS1Backend(Backend):
         # NOTE: this is done this way, because the writers move data from the GPU->CPU and then publish it to ROS1
         # in a separate thread. This is done to avoid blocking the simulation
         self.graphical_sensors_writers = {}
-        
+        self.input_ref = None
+
         # Setup zero input reference for the thrusters
-        self.input_ref = [0.0 for i in range(self._num_rotors)]
+        self.init_input_reference()
 
         # -----------------------------------------------------
         # Initialize the static and dynamic tf broadcasters
@@ -139,7 +138,7 @@ class ROS1Backend(Backend):
 
         if self._sub_control:
             self.cmd = None
-            self.controller = trajController(results_file=config.get("result_file", None))
+            self.controller = controller
 
     
     def initialize_publishers(self, config: dict):
@@ -185,7 +184,8 @@ class ROS1Backend(Backend):
         if self.vehicle.vehicle_state == MultirotorState.LAND and self.state is not None:
             self.cmd = [np.asarray([self.state.position[0], self.state.position[1], height]),
                         np.asarray([0, 0, 0.5]), np.asarray([0, 0, 0]),
-                        np.asarray([0, 0, 0]), R.from_quat(self.state.attitude).as_euler("ZYX")[0], 0.1]
+                        np.asarray([0, 0, 0]), 0.0, 0.1]
+                      #   np.asarray([0, 0, 0]), R.from_quat(self.state.attitude).as_euler("ZYX")[0], 0.1]
             return True
         return False
 
@@ -195,77 +195,7 @@ class ROS1Backend(Backend):
                     np.asarray([0, 0, 0]), R.from_quat(self.state.attitude).as_euler("ZYX")[0], 0]
 
     def send_static_transforms(self):
-        # Create the transformation from base_link FLU (ROS standard) to base_link FRD (standard in airborn and marine vehicles)
-        t = TransformStamped()
-        t.header.stamp = rospy.Time.now()
-        t.header.frame_id = self._namespace + '_' + 'base_link'
-        t.child_frame_id = self._namespace + '_' + 'base_link_frd'
-
-        # Converts from FLU to FRD
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
-        t.transform.translation.z = 0.0
-        t.transform.rotation.x = 1.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
-        t.transform.rotation.w = 0.0
-
-        self.tf_static_broadcaster.sendTransform(t)
-
-        # Create the transform from map, i.e inertial frame (ROS standard) to map_ned (standard in airborn or marine vehicles)
-        t = TransformStamped()
-        t.header.stamp = rospy.Time.now()
-        t.header.frame_id = "map"
-        t.child_frame_id = "map_ned"
-        
-        # Converts ENU to NED
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
-        t.transform.translation.z = 0.0
-        t.transform.rotation.x = -0.7071068
-        t.transform.rotation.y = -0.7071068
-        t.transform.rotation.z = 0.0
-        t.transform.rotation.w = 0.0
-
-        self.tf_static_broadcaster.sendTransform(t)
-
-        if self.vehicle != None:
-            body_prim = prims_utils.get_prim_at_path(self.vehicle._stage_prefix + "/body")
-            rotors_prim_path = prims_utils.find_matching_prim_paths(self.vehicle._stage_prefix + "/rotor*")
-            
-            graphical_sensors_prim_path = list()
-            for e in self.vehicle._graphical_sensors:
-                graphical_sensors_prim_path.append(e._stage_prim_path)
-            
-            for e in (rotors_prim_path + graphical_sensors_prim_path):
-                trans_matrix = transformations_utils.get_relative_transform(prims_utils.get_prim_at_path(e), body_prim)
-                trans, rot_q = transformations_utils.pose_from_tf_matrix(trans_matrix)
-
-                t = TransformStamped()
-                t.header.stamp = rospy.Time.now()
-                t.header.frame_id = self._namespace + '_' + "base_link"
-                t.child_frame_id = e.rpartition("/")[-1]
-                t.transform.translation.x = trans[0]
-                t.transform.translation.y = trans[1]
-                t.transform.translation.z = trans[2]
-                t.transform.rotation.x = rot_q[1]
-                t.transform.rotation.y = rot_q[2]
-                t.transform.rotation.z = rot_q[3]
-                t.transform.rotation.w = rot_q[0]
-
-                self.tf_static_broadcaster.sendTransform(t)
-
-                if t.child_frame_id.startswith('camera'):
-                    rot_q = R.from_quat([rot_q[1], rot_q[2], rot_q[3], rot_q[0]])
-                    rot_q *= R.from_euler('xyz', [180, 0, 0], degrees=True)
-                    rot_q = rot_q.as_quat()
-                    t.child_frame_id += '_ros'
-                    t.transform.rotation.x = rot_q[0]
-                    t.transform.rotation.y = rot_q[1]
-                    t.transform.rotation.z = rot_q[2]
-                    t.transform.rotation.w = rot_q[3]
-
-                    self.tf_static_broadcaster.sendTransform(t)
+        pass
 
     def update_state(self, state):
         """
@@ -358,10 +288,6 @@ class ROS1Backend(Backend):
             self.tf_broadcaster.sendTransform(t)
 
             self.send_static_transforms()
-
-    def rotor_callback(self, ros_msg: Float64, rotor_id):
-        # Update the reference for the rotor of the vehicle
-        self.input_ref[rotor_id] = float(ros_msg.data)
 
     def update_sensor(self, sensor_type: str, data):
         """
@@ -556,6 +482,9 @@ class ROS1Backend(Backend):
         # return self.input_ref
         return self.input_ref
 
+    def init_input_reference(self):
+        pass
+
     def update(self, dt: float):
         """
         Method that when implemented, should be used to update the state of the backend and the information being sent/received
@@ -573,7 +502,7 @@ class ROS1Backend(Backend):
         Method that when implemented should handle the begining of the simulation of vehicle
         """
         # Reset the reference for the thrusters
-        self.input_ref = [0.0 for i in range(self._num_rotors)]
+        self.init_input_reference()
         
         if self._sub_control:
             self.controller.start()
@@ -584,7 +513,7 @@ class ROS1Backend(Backend):
         """
         # Reset the reference for the thrusters
         self.cmd = None
-        self.input_ref = [0.0 for i in range(self._num_rotors)]
+        self.init_input_reference()
 
         if self._sub_control:
             self.controller.stop()
@@ -595,7 +524,7 @@ class ROS1Backend(Backend):
         """
         # Reset the reference for the thrusters
         self.cmd = None
-        self.input_ref = [0.0 for i in range(self._num_rotors)]
+        self.init_input_reference()
 
         if self._sub_control:
             self.controller.reset()

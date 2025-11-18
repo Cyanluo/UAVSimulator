@@ -1,10 +1,3 @@
-"""
-| File: multirotor.py
-| Author: Marcelo Jacinto (marcelo.jacinto@tecnico.ulisboa.pt)
-| License: BSD-3-Clause. Copyright (c) 2024, Marcelo Jacinto. All rights reserved.
-| Description: Definition of the Multirotor class which is used as the base for all the multirotor vehicles.
-"""
-
 import numpy as np
 
 # The vehicle interface
@@ -17,11 +10,11 @@ from pegasus.simulator.logic.backends.px4_mavlink_backend import PX4MavlinkBacke
 from pegasus.simulator.logic.dynamics import LinearDrag
 from pegasus.simulator.logic.thrusters import QuadraticThrustCurve
 from pegasus.simulator.logic.sensors import Barometer, IMU, Magnetometer, GPS
-from pegasus.simulator.logic.interface.pegasus_interface import MultirotorState
+from pegasus.simulator.logic.interface.pegasus_interface import MultirotorState, PegasusInterface
 
 class CoaxCopterConfig:
     """
-    A data class that is used for configuring a Multirotor
+    A data class that is used for configuring a CoaxCopter
     """
 
     def __init__(self):
@@ -35,8 +28,20 @@ class CoaxCopterConfig:
         # The USD file that describes the visual aspect of the vehicle (and some properties such as mass and moments of inertia)
         self.usd_file = ""
 
+        self.num_servo = 2
+
         # The default thrust curve for a quadrotor and dynamics relating to drag
-        self.thrust_curve = QuadraticThrustCurve()
+        # 15 inch
+        self.thrust_curve = QuadraticThrustCurve(config={
+                                "num_rotors": 2,
+                                "rotor_constant": [3.92e-5, 3.92e-5],
+                                "rolling_moment_coefficient": [1.6e-6, 1.6e-6],
+                                "rot_dir": [1, 1],
+                                "force_dir": [1, -1],
+                                "min_rotor_velocity": [0, 0],       # rad/s
+                                "max_rotor_velocity": [900, 900], # rad/s
+                                })
+
         self.drag = LinearDrag([0.50, 0.30, 0.0])
 
         # The default sensors for a quadrotor
@@ -55,7 +60,7 @@ class CoaxCopterConfig:
 
 
 class CoaxCopter(Vehicle):
-    """Multirotor class - It defines a base interface for creating a multirotor
+    """CoaxCopter class - It defines a base interface for creating a coaxCopter
     """
     def __init__(
         self,
@@ -69,7 +74,7 @@ class CoaxCopter(Vehicle):
         collision_check=False,
         config=CoaxCopterConfig(),
     ):
-        """Initializes the multirotor object
+        """Initializes the coaxCopter object
 
         Args:
             stage_prefix (str): The name the vehicle will present in the simulator when spawned. Defaults to "quadrotor".
@@ -89,6 +94,12 @@ class CoaxCopter(Vehicle):
         # 2. Setup the dynamics of the system - get the thrust curve of the vehicle from the configuration
         self._thrusters = config.thrust_curve
         self._drag = config.drag
+        self._num_servo = config.num_servo
+        self.pg = PegasusInterface()
+        self.take_off_flag = False
+        self.camera_pos = np.array([5.0, 4.0, 0.3])
+        self.camera_target = np.array([3.3, 0.0, 0.3])
+        self._target_take_off_height = 0
 
         # vehicle state: 0:land  1:flying  2:collision
         self._vehicle_state = MultirotorState.LAND
@@ -97,84 +108,103 @@ class CoaxCopter(Vehicle):
     def vehicle_state(self):
         return self._vehicle_state
 
-    def start(self):
-        """In this case we do not need to do anything extra when the simulation starts"""
-        pass
-
     def stop(self):
         """In this case we do not need to do anything extra when the simulation stops"""
-        pass
+        self._vehicle_state = MultirotorState.LAND
+        super().stop()
 
     def update(self, dt: float):
         """
-        Method that computes and applies the forces to the vehicle in simulation based on the motor speed. 
+        Method that computes and applies the forces to the vehicle in simulation based on the motor speed.
         This method must be implemented by a class that inherits this type. This callback
         is called on every physics step.
 
         Args:
             dt (float): The time elapsed between the previous and current function calls (s).
-           """
-        
-        # if self._vehicle_state == MultirotorState.LAND:
-        #     self.take_off(1.0)
+        """
+        # if self.pg.world.current_time > 2:
+        if self._vehicle_state == MultirotorState.LAND:
+            self.take_off(3.0)
 
-        # if self._vehicle_state == MultirotorState.TAKE_OFF:
-        #     if self._state.position[2] > (self._target_take_off_height-0.01):
-        #         self._backends[0].hold()
-        #         self._vehicle_state = MultirotorState.FLYING
+        if self._vehicle_state == MultirotorState.TAKE_OFF:
+            if self._state.position[2] > (self._target_take_off_height-0.01):
+                self._backends[0].hold()
+                self._vehicle_state = MultirotorState.FLYING
 
-        # # Get the articulation root of the vehicle
-        # articulation = self.get_dc_interface().get_articulation(self._stage_prefix)
+        # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
+        desired_drive_val = dict()
+        if len(self._backends) != 0:
+            desired_drive_val = self._backends[0].input_reference()
+        else:
+            desired_drive_val["rotor"] = [0.0 for i in range(self._thrusters._num_rotors)]
+            desired_drive_val["servo"] = [0.0 for i in range(self._num_servo)]
 
-        # # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
-        # if len(self._backends) != 0:
-        #     desired_rotor_velocities = self._backends[0].input_reference()
-        # else:
-        #     desired_rotor_velocities = [0.0 for i in range(self._thrusters._num_rotors)]
+        pos = self._state.position
+        v1 = self.camera_target - self.camera_pos
+        v2 = pos - self.camera_pos
+        # 计算夹角（单位：度）
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        cos_angle = np.clip(cos_angle, -1.0, 1.0)  # 防止数值误差
+        angle = np.degrees(np.arccos(cos_angle))
 
-        # # Input the desired rotor velocities in the thruster model
-        # self._thrusters.set_input_reference(desired_rotor_velocities)
+        # 计算距离
+        dist = np.linalg.norm(self._state.position - self.camera_pos)
 
-        # # Get the desired forces to apply to the vehicle
-        # forces_z, _, rolling_moment = self._thrusters.update(self._state, dt)
+        # 判断是否需要更新视角
+        if angle > 20 or dist > 40:
+            self.camera_pos = np.array([pos[0] + 8, pos[1] + 8, pos[2] + 2])
+            self.camera_target = pos
+            self.pg.set_viewport_camera(
+                self.camera_pos.tolist(),
+                pos.tolist()
+            )
 
-        # # Apply force to each rotor
-        # for i in range(2):
+        # Input the desired rotor velocities in the thruster model
+        self._thrusters.set_input_reference(desired_drive_val["rotor"])
 
-        #     # Apply the force in Z on the rotor frame
-        #     self.apply_force([0.0, 0.0, forces_z[i]], body_part="/rotor" + str(i))
+        # Get the desired forces to apply to the vehicle
+        forces_z, _, rolling_moment = self._thrusters.update(self._state, dt)
 
-        #     # Generate the rotating propeller visual effect
-        #     self.handle_propeller_visual(i, forces_z[i], articulation)
+        rotors_name = ["/motor_up_link", "/motor_down_link"]
 
-        # # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
-        # self.apply_torque([0.0, 0.0, rolling_moment], "/body")
+        # Apply force to each rotor
+        for i, name in enumerate(rotors_name):
 
-        # # Compute the total linear drag force to apply to the vehicle's body frame
-        # drag = self._drag.update(self._state, dt)
-        # self.apply_force(drag, body_part="/body")
+            # Apply the force in Z on the rotor frame
+            self.apply_force([0.0, 0.0, forces_z[i]], body_part=name)
 
-        # # Call the update methods in all backends
-        # for backend in self._backends:
-        #     backend.update(dt)
+            # Apply the torque to the body frame of the vehicle that corresponds to the rolling moment
+            self.apply_torque([0.0, 0.0, rolling_moment[i]], body_part=name)
 
-        # is_contact, value = self.in_contact()
-        # if is_contact and (self._vehicle_state == MultirotorState.FLYING or self._vehicle_state == MultirotorState.COLLISION):
-        #     self._vehicle_state = MultirotorState.COLLISION
-        #     print(value)
-        #     for contact in value['contacts']:
-        #         print(f" Contact: {contact['body0']} <--> {contact['body1']}")
-        #     print("\r\n")
-        #     self.reset()
-        
+            # Generate the rotating propeller visual effect
+            self.handle_propeller_visual(i, desired_drive_val["rotor"][i])
+
+        self.set_joints_position_targets(desired_drive_val["servo"], ["servo_up_joint", "servo_down_joint"])
+
+        # Compute the total linear drag force to apply to the vehicle's body frame
+        drag = self._drag.update(self._state, dt)
+        self.apply_force(drag, body_part=self._base_name)
+
+        # Call the update methods in all backends
+        for backend in self._backends:
+            backend.update(dt)
+
+        is_contact, value = self.in_contact()
+        if is_contact and (self._vehicle_state == MultirotorState.FLYING or self._vehicle_state == MultirotorState.COLLISION):
+            self._vehicle_state = MultirotorState.COLLISION
+            print(value)
+            for contact in value['contacts']:
+                print(f" Contact: {contact['body0']} <--> {contact['body1']}")
+            print("\r\n")
+            self.reset()
 
     def reset(self):
         self._vehicle_state = MultirotorState.LAND
         super().reset()
 
-    def handle_propeller_visual(self, rotor_number, force: float, articulation):
+    def handle_propeller_visual(self, rotor_number, speed: float):
         """
-        Auxiliar method used to set the joint velocity of each rotor (for animation purposes) based on the 
+        Auxiliar method used to set the joint velocity of each rotor (for animation purposes) based on the
         amount of force being applied on each joint
 
         Args:
@@ -183,81 +213,71 @@ class CoaxCopter(Vehicle):
             articulation (_type_): The articulation group the joints of the rotors belong to
         """
 
-        # Rotate the joint to yield the visual of a rotor spinning (for animation purposes only)
-        joint = self.get_dc_interface().find_articulation_dof(articulation, "joint" + str(rotor_number))
+        rotors_joint = ["motor_up_joint", "motor_down_joint"]
 
-        # Spinning when armed but not applying force
-        if 0.0 < force < 0.1:
-            self.get_dc_interface().set_dof_velocity(joint, 5 * self._thrusters.rot_dir[rotor_number])
-        # Spinning when armed and applying force
-        elif 0.1 <= force:
-            self.get_dc_interface().set_dof_velocity(joint, 100 * self._thrusters.rot_dir[rotor_number])
-        # Not spinning
-        else:
-            self.get_dc_interface().set_dof_velocity(joint, 0)
+        self.set_joints_velocity_targets([speed * self._thrusters.rot_dir[rotor_number]], [rotors_joint[rotor_number]])
+
+    def adjust_pair_float(self, a, b, dmax):
+        """
+        Ensure that the absolute difference between the two values is <= dmax
+        while preserving their relative order.
+        If the difference is already within the range, no adjustment is made.
+        """
+        swapped = False
+        if a < b:
+            a, b = b, a
+            swapped = True
+
+        d = a - b
+        if d <= dmax:
+            return (b, a) if swapped else (a, b)
+
+        delta = d - dmax
+        a_new = a - delta / 2.0
+        b_new = b + delta / 2.0
+
+        return (b_new, a_new) if swapped else (a_new, b_new)
+
+    def decay_scalar(self, a, b, delta=0.2, b0=0.6, k=0.5, gamma=1.6):
+        """
+        b=0.6 -> y = a
+        b < 0.6 -> |y| > |a|
+        b > 0.6 -> |y| < |a|
+        |y - a| <= delta
+        """
+        b = max(0.0, min(1.0, b))
+        diff = b - b0
+        scale = 1.0 - k * (np.sign(diff) if diff != 0 else 0.0) * (abs(diff) ** gamma)
+        y_cand = a * scale
+        y = max(a - delta, min(a + delta, y_cand))
+        return y
 
     def force_and_torques_to_velocities(self, force: float, torque: np.ndarray):
-        """
-        Auxiliar method used to get the target angular velocities for each rotor, given the total desired thrust [N] and
-        torque [Nm] to be applied in the multirotor's body frame.
 
-        Note: This method assumes a quadratic thrust curve. This method will be improved in a future update,
-        and a general thrust allocation scheme will be adopted. For now, it is made to work with multirotors directly.
+        if force == torque[0] == torque[1] == torque[2] == 0:
+            desired_drive_val = dict()
+            desired_drive_val["rotor"] = [0.0 for i in range(self._thrusters._num_rotors)]
+            desired_drive_val["servo"] = [0.0 for i in range(self._num_servo)]
+            return  desired_drive_val
 
-        Args:
-            force (np.ndarray): A vector of the force to be applied in the body frame of the vehicle [N]
-            torque (np.ndarray): A vector of the torque to be applied in the body frame of the vehicle [Nm]
+        out_yaw_thrust = torque[2]
+        up_thrust = np.clip(force-0.5*out_yaw_thrust, 0.2, 1)
+        down_thrust = np.clip(force+0.5*out_yaw_thrust, 0.2, 1)
 
-        Returns:
-            list: A list of angular velocities [rad/s] to apply in reach rotor to accomplish suchs forces and torques
-        """
+        up_thrust, down_thrust = self.adjust_pair_float(up_thrust, down_thrust, 0.4)
+        print("up_thrust, down_thrust:", up_thrust, down_thrust)
 
-        # Get the body frame of the vehicle
-        rb = self.get_dc_interface().get_rigid_body(self._stage_prefix + "/body")
+        up_thrust_vel = up_thrust * self._thrusters.max_rotor_velocity[0]
+        down_thrust_vel = down_thrust * self._thrusters.max_rotor_velocity[1]
 
-        # Get the rotors of the vehicle
-        rotors = [self.get_dc_interface().get_rigid_body(self._stage_prefix + "/rotor" + str(i)) for i in range(self._thrusters._num_rotors)]
+        desired_drive_val = dict()
+        desired_drive_val["rotor"] = [up_thrust_vel, down_thrust_vel]
 
-        # Get the relative position of the rotors with respect to the body frame of the vehicle (ignoring the orientation for now)
-        relative_poses = self.get_dc_interface().get_relative_body_poses(rb, rotors)
+        up_angel = np.clip(self.decay_scalar(-torque[1]/0.6*0.5*3.14, force), -0.5*3.14*0.9, 0.5*3.14*0.9)
+        down_angel = np.clip(self.decay_scalar(-torque[0]/0.6*0.5*3.14, force), -0.5*3.14*0.9, 0.5*3.14*0.9)
+        desired_drive_val["servo"] = [up_angel, down_angel]
 
-        # Define the alocation matrix
-        aloc_matrix = np.zeros((4, self._thrusters._num_rotors))
-        
-        # Define the first line of the matrix (T [N])
-        aloc_matrix[0, :] = np.array(self._thrusters._rotor_constant)                                           
-
-        # Define the second and third lines of the matrix (\tau_x [Nm] and \tau_y [Nm])
-        aloc_matrix[1, :] = np.array([relative_poses[i].p[1] * self._thrusters._rotor_constant[i] for i in range(self._thrusters._num_rotors)])
-        aloc_matrix[2, :] = np.array([-relative_poses[i].p[0] * self._thrusters._rotor_constant[i] for i in range(self._thrusters._num_rotors)])
-
-        # Define the forth line of the matrix (\tau_z [Nm])
-        aloc_matrix[3, :] = np.array([self._thrusters._rolling_moment_coefficient[i] * self._thrusters._rot_dir[i] for i in range(self._thrusters._num_rotors)])
-
-        # Compute the inverse allocation matrix, so that we can get the angular velocities (squared) from the total thrust and torques
-        aloc_inv = np.linalg.pinv(aloc_matrix)
-
-        # Compute the target angular velocities (squared)
-        squared_ang_vel = aloc_inv @ np.array([force, torque[0], torque[1], torque[2]])
-
-        # Making sure that there is no negative value on the target squared angular velocities
-        squared_ang_vel[squared_ang_vel < 0] = 0.0
-
-        # ------------------------------------------------------------------------------------------------
-        # Saturate the inputs while preserving their relation to each other, by performing a normalization
-        # ------------------------------------------------------------------------------------------------
-        max_thrust_vel_squared = np.power(self._thrusters.max_rotor_velocity[0], 2)
-        max_val = np.max(squared_ang_vel)
-
-        if max_val >= max_thrust_vel_squared:
-            normalize = np.maximum(max_val / max_thrust_vel_squared, 1.0)
-
-            squared_ang_vel = squared_ang_vel / normalize
-
-        # Compute the angular velocities for each rotor in [rad/s]
-        ang_vel = np.sqrt(squared_ang_vel)
-
-        return ang_vel
+        return desired_drive_val
 
     def take_off(self, height):
         if len(self._backends) != 0:

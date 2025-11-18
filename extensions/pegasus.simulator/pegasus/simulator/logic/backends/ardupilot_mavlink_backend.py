@@ -125,6 +125,7 @@ class ThrusterControl:
         input_min: int = 1000,
         input_max: int = 2000,
         zero_position_armed=[100, 100, 100, 100],
+        zero_ref = [0, 0, 0, 0]
     ):
         """Initialize the ThrusterControl object
 
@@ -157,7 +158,9 @@ class ThrusterControl:
         self.zero_position_armed = zero_position_armed
 
         # The actual speed references to apply to the vehicle rotor joints
-        self._input_reference = [0.0 for i in range(self.num_rotors)]
+        assert len(zero_ref) == self.num_rotors
+        self._zero_reference = zero_ref
+        self._input_reference = zero_ref
 
     @property
     def input_reference(self):
@@ -203,7 +206,7 @@ class ThrusterControl:
         """
         When this method is called, the input_reference is updated such that every rotor is stopped
         """
-        self._input_reference = [0.0 for i in range(self.num_rotors)]
+        self._input_reference = self._zero_reference
 
 
 class ArduPilotMavlinkBackendConfig(BackendConfig):
@@ -227,12 +230,14 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
             >>>  "connection_baseport": 5760,
             >>>  "ardupilot_autolaunch": True,
             >>>  "ardupilot_dir": "PegasusInterface().ardupilot_path",
+            >>>  "ardupilot_data_path" : None,
             >>>  "ardupilot_vehicle_model": "gazebo-iris",
             >>>  "enable_lockstep": True,
             >>>  "num_rotors": 4,
             >>>  "input_offset": [0.0, 0.0, 0.0, 0.0],
             >>>  "input_scaling": [1000.0, 1000.0, 1000.0, 1000.0],
             >>>  "zero_position_armed": [100.0, 100.0, 100.0, 100.0],
+            >>>  "zero_ref" : [0, 0, 0, 0],
             >>>  "update_rate": 250.0
             >>> }
         """
@@ -256,6 +261,7 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
         self.ardupilot_vehicle_model: str = config.get(
             "ardupilot_vehicle_model", "gazebo-iris"
         )
+        self.ardupilot_data_path = config.get("ardupilot_data_path", None)
 
         # Configurations to interpret the rotors control messages coming from mavlink
         self.enable_lockstep: bool = config.get("enable_lockstep", False)
@@ -267,6 +273,8 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
         self.zero_position_armed = config.get(
             "zero_position_armed", [100, 100, 100, 100]
         )
+
+        self.zero_ref = config.get("zero_ref", [0, 0, 0, 0])
 
         # The update rate at which we will be sending data to mavlink (TODO - remove this from here in the future
         # and infer directly from the function calls)
@@ -319,6 +327,7 @@ class ArduPilotMavlinkBackend(Backend):
         )  # only needed if ardupilot_autolaunch == True
         self.ardupilot_tool: ArduPilotLaunchTool = None
         self.ardupilot_dir: str = config.ardupilot_dir
+        self.ardupilot_data_path = config.ardupilot_data_path
 
         # Set the update rate used for sending the messages (TODO - remove this hardcoded value from here)
         self._update_rate: float = config.update_rate
@@ -337,6 +346,7 @@ class ArduPilotMavlinkBackend(Backend):
             config.input_min,
             config.input_max,
             config.zero_position_armed,
+            config.zero_ref
         )
 
         # Vehicle actuator control data
@@ -585,7 +595,7 @@ class ArduPilotMavlinkBackend(Backend):
                 f"[ArduPilotMavlinkBackend] About to call launch_ardupilot() with dir={self.ardupilot_dir}, id={self._vehicle_id}, model={self.ardupilot_vehicle_model}"
             )
             self.ardupilot_tool = ArduPilotLaunchTool(
-                self.ardupilot_dir, self._vehicle_id, self.ardupilot_vehicle_model
+                self.ardupilot_dir, self._vehicle_id, self.ardupilot_vehicle_model, self.ardupilot_data_path
             )
             self.ardupilot_tool.launch_ardupilot()
 

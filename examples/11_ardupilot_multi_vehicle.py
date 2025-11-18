@@ -25,7 +25,7 @@ from omni.isaac.core.world import World
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 from pegasus.simulator.logic.backends.ardupilot_mavlink_backend import (
     ArduPilotMavlinkBackend, ArduPilotMavlinkBackendConfig)
-from pegasus.simulator.logic.backends.ros2_backend import ROS2Backend
+# from pegasus.simulator.logic.backends.ros2_backend import ROS2Backend
 from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorConfig
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 
@@ -85,16 +85,16 @@ class PegasusApp:
         })
         config_multirotor.backends = [
             ArduPilotMavlinkBackend(config=backend_config), 
-            ROS2Backend(vehicle_id=vehicle_id, 
-                config={
-                    "namespace": f'drone', # vehicle_id is added here by default
-                    "pub_sensors": True,
-                    "pub_graphical_sensors": True,
-                    "pub_state": True,
-                    "sub_control": False,
-                    "pub_tf": True,
-                }
-            )
+            # ROS2Backend(vehicle_id=vehicle_id,
+            #     config={
+            #         "namespace": f'drone', # vehicle_id is added here by default
+            #         "pub_sensors": True,
+            #         "pub_graphical_sensors": True,
+            #         "pub_state": True,
+            #         "sub_control": False,
+            #         "pub_tf": True,
+            #     }
+            # )
         ]
         
         Multirotor(

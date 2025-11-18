@@ -77,7 +77,7 @@ BACKENDS = {
 # Define the default settings for the simulation environment
 WORLD_SETTINGS = {
     'px4': {
-        "physics_dt": 1.0 / 240.0,
+        "physics_dt": 1.0 / 250.0,
         "stage_units_in_meters": 1.0,
         "rendering_dt": 1.0 / 60.0,
         "device": "cpu"
@@ -85,7 +85,7 @@ WORLD_SETTINGS = {
     'ardupilot': {
         "physics_dt": 1.0 / 800.0, # Reach communication of 250hz with ardupilot sitl
         "stage_units_in_meters": 1.0,
-        "rendering_dt": 1.0 / 100.0,
+        "rendering_dt": 1.0 / 120.0,
         "device": "cpu"
     },
     'ros2': {
@@ -95,7 +95,7 @@ WORLD_SETTINGS = {
         "device": "cpu"
     }
 }
-DEFAULT_WORLD_SETTINGS = WORLD_SETTINGS['px4']
+DEFAULT_WORLD_SETTINGS = WORLD_SETTINGS['ardupilot']
 
 # Define where the thumbnail of the vehicle is located
 THUMBNAIL = ROBOTS_ASSETS + "/Iris/iris_thumbnail.png"

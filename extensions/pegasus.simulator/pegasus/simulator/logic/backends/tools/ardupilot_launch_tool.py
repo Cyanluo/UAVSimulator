@@ -19,7 +19,7 @@ class ArduPilotLaunchTool:
     Ardupilot was already built with 'make ardupilot_sitl_default none'), the vehicle id and the vehicle model. 
     """
 
-    def __init__(self, ardupilot_dir, vehicle_id: int = 0, ardupilot_model: str = "gazebo-iris"):
+    def __init__(self, ardupilot_dir, vehicle_id: int = 0, ardupilot_model: str = "gazebo-iris", data_path = None):
         """Construct the ArduPilotLaunchTool object
 
         Args:
@@ -46,6 +46,7 @@ class ArduPilotLaunchTool:
         
         # Create a temporary filesystem for ardupilot to write data to/from (and modify the origin rcS files)
         self.root_fs = tempfile.TemporaryDirectory()
+        self.data_path = data_path
 
         # Set the environement variables that let Ardupilot know which vehicle model to use internally
         self.environment = os.environ
@@ -67,11 +68,9 @@ class ArduPilotLaunchTool:
             "-f", f"{self._get_vehicle_frame()}",
             "--model", f"{self.model}",
             f"{'--no-rebuild' if self._sitl_already_exists() else ''}",
-            f"--console",
-            f"--map",
             "-I", f"{self.vehicle_id}",
             "--sysid", f"{self.vehicle_id + 1}",
-            "--out", f"udp:127.0.0.1:{14550 + self.vehicle_id * 10}",
+            "--out", f"127.0.0.1:{14550 + self.vehicle_id * 10}",
         ]
         command: str = " ".join(command)
         
@@ -79,7 +78,7 @@ class ArduPilotLaunchTool:
         self.ardupilot_process = subprocess.Popen(
             # ["gnome-terminal", '--disable-factory', '--', 'bash', '-c', command],
             ["gnome-terminal", '--', 'bash', '-c', command],
-            cwd=self.root_fs.name,
+            cwd=self.root_fs.name if self.data_path is None else self.data_path,
             shell=False,
             env=self.environment,
             preexec_fn=os.setsid

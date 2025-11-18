@@ -397,13 +397,16 @@ class Vehicle(Robot):
         """
         Method that should be implemented by the class that inherits the vehicle object.
         """
-        pass
+
+        self.initialize()
+        for backend in self._backends:
+            backend.initialize(self)
 
     def stop(self):
         """
         Method that should be implemented by the class that inherits the vehicle object.
         """
-        pass
+        self.post_reset()
 
     def update(self, dt: float):
         """
@@ -417,9 +420,8 @@ class Vehicle(Robot):
         pass
 
     def reset(self):
-        for backend in self._backends:
-                backend.reset()
-        self.post_reset()
+        self.stop()
+        self.start()
 
     def update_sensors(self, dt: float):
         """Callback that is called at every physics steps and will call the sensor.update method to generate new

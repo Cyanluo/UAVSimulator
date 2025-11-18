@@ -28,7 +28,7 @@ from pxr import UsdLux, Gf
 # Import the Pegasus API for simulating drones
 from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 from pegasus.simulator.logic.graphical_sensors.monocular_camera import MonocularCamera
-from pegasus.simulator.logic.backends.ros1_backend import ROS1Backend
+from pegasus.simulator.logic.backends.multirotor_ros1_backend import ROS1MultiRotorBackend
 from pegasus.simulator.logic.vehicles.multirotor import Multirotor, MultirotorConfig
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 
@@ -94,9 +94,9 @@ class PegasusApp:
         # Try to spawn the selected robot in the world to the specified namespace
         config_multirotor = MultirotorConfig()
         config_multirotor.backends = [
-            ROS1Backend(vehicle_id=1, 
-                        sim_app= simulation_app,
-                        config={
+            ROS1MultiRotorBackend(vehicle_id=1,
+                            sim_app= simulation_app,
+                            config={
                             "namespace": 'drone', 
                             "pub_sensors": True,
                             "pub_graphical_sensors": True,

@@ -23,7 +23,7 @@ from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 from pegasus.simulator.logic.vehicles.coaxcopter import CoaxCopter, CoaxCopterConfig
 from pegasus.simulator.logic.graphical_sensors.monocular_camera import MonocularCamera
-from pegasus.simulator.logic.backends.ros1_backend import ROS1Backend
+from pegasus.simulator.logic.backends.coax_ros1_backend import ROS1CoaxCopterBackend
 
 # Auxiliary scipy and numpy modules
 from scipy.spatial.transform import Rotation
@@ -59,44 +59,22 @@ class PegasusApp:
         domeLight.CreateIntensityAttr(1000)
         domeLight.CreateColorAttr(Gf.Vec3f(1.0, 1.0, 1.0))
 
-        from omni.isaac.core.objects import DynamicCuboid
-        import numpy as np
-        cube_2 = self.world.scene.add(
-            DynamicCuboid(
-                prim_path="/new_cube_2",
-                name="cube_1",
-                position=np.array([-3.0, 0, 2.0]),
-                scale=np.array([1.0, 1.0, 1.5]),
-                size=1.0,
-                color=np.array([255, 0, 0]),
-            )
-        )
-
-        cube_3 = self.world.scene.add(
-            DynamicCuboid(
-                prim_path="/new_cube_3",
-                name="cube_2",
-                position=np.array([-1.9, 1.3, 2.0]),
-                scale=np.array([1.0, 1.0, 1.0]),
-                size=1.0,
-                color=np.array([255, 0, 0]),
-            )
-        )
-
         # Create the vehicle
         # Try to spawn the selected robot in the world to the specified namespace
         config_coaxcopter = CoaxCopterConfig()
         config_coaxcopter.backends = [
-            ROS1Backend(vehicle_id=1, 
-                        sim_app= simulation_app,
-                        config={
-                            "namespace": 'drone', 
+            ROS1CoaxCopterBackend(vehicle_id=1,
+                            sim_app= simulation_app,
+                            num_servo = config_coaxcopter.num_servo,
+                            config={
+                            "namespace": 'drone',
                             "pub_sensors": True,
                             "pub_graphical_sensors": True,
                             "pub_state": True,
                             "sub_control": True,
                             "pub_tf": False,
-                            "pub_clock": True})]
+                            "pub_clock": True,
+                            "result_file":"debug/data_02.npz"})]
 
         # Create a camera and lidar sensors
         config_coaxcopter.graphical_sensors = [MonocularCamera("camera", config={"update_rate": 60.0, "depth": True,})] # Lidar("lidar")
@@ -105,14 +83,14 @@ class PegasusApp:
             "/World/coaxcopter",
             ROBOTS['dumbbel'],
             0,
-            [3.3, 0.0, 1.0],
+            [3.3, 0.0, 4.0],
             Rotation.from_euler("XYZ", [0.0, 0.0, 0.0], degrees=True).as_quat(),
             config=config_coaxcopter,
             collision_check=True
         )
 
         # Set the camera of the viewport to a nice position
-        self.pg.set_viewport_camera([5.0, 9.0, 6.5], [0.0, 0.0, 0.0])
+        self.pg.set_viewport_camera([5.0, 9.0, 6.5], [0.0, 0.0, 2.5])
 
         # Reset the simulation environment so that all articulations (aka robots) are initialized
         self.world.reset()

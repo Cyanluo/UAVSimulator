@@ -41,3 +41,7 @@ _build
 build/
 install/
 log/
+
+# data
+**/apm_data
+**/debug

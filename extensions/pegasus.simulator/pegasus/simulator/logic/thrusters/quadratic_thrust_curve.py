@@ -5,6 +5,8 @@
 | License: BSD-3-Clause. Copyright (c) 2023, Marcelo Jacinto. All rights reserved.
 """
 import numpy as np
+from numba.tests.test_gil import sleep
+
 from pegasus.simulator.logic.state import State
 from pegasus.simulator.logic.thrusters.thrust_curve import ThrustCurve
 
@@ -24,10 +26,12 @@ class QuadraticThrustCurve(ThrustCurve):
             >>>  "rotor_constant": [5.84e-6, 5.84e-6, 5.84e-6, 5.84e-6],
             >>>  "rolling_moment_coefficient": [1e-6, 1e-6, 1e-6, 1e-6],
             >>>  "rot_dir": [-1, -1, 1, 1],
+            >>>  "force_dir": [1, 1, 1, 1],
             >>>  "min_rotor_velocity": [0, 0, 0, 0],                      # rad/s
             >>>  "max_rotor_velocity": [1100, 1100, 1100, 1100],          # rad/s
             >>> }
         """
+        super().__init__()
 
         # Get the total number of rotors to simulate
         self._num_rotors = config.get("num_rotors", 4)
@@ -44,12 +48,25 @@ class QuadraticThrustCurve(ThrustCurve):
         self._rot_dir = config.get("rot_dir", [-1, -1, 1, 1])
         assert len(self._rot_dir) == self._num_rotors
 
+        # The relationship between the direction of the force and the coordinate system of the blade
+        self._force_dir = config.get("force_dir", [1, 1, 1, 1])
+
         # Values for the minimum and maximum rotor velocity in rad/s
         self.min_rotor_velocity = config.get("min_rotor_velocity", [0, 0, 0, 0])
         assert len(self.min_rotor_velocity) == self._num_rotors
 
         self.max_rotor_velocity = config.get("max_rotor_velocity", [1100, 1100, 1100, 1100])
         assert len(self.max_rotor_velocity) == self._num_rotors
+
+        self.max_force = [0.0 for i in range(self._num_rotors)]
+        self.max_moment = [0.0 for i in range(self._num_rotors)]
+
+        for i in range(self._num_rotors):
+            # Set the force using a quadratic thrust curve
+            self.max_force[i] = self._force_dir[i] * self._rotor_constant[i] * np.power(self.max_rotor_velocity[i], 2)
+
+            # Compute the rolling moment coefficient
+            self.max_moment[i] = -1 * self._rolling_moment_coefficient[i] * np.power(self.max_rotor_velocity[i], 2.0) * self._rot_dir[i]
 
         # The actual speed references to apply to the vehicle rotor joints
         self._input_reference = [0.0 for i in range(self._num_rotors)]
@@ -92,12 +109,12 @@ class QuadraticThrustCurve(ThrustCurve):
             )
 
             # Set the force using a quadratic thrust curve
-            self._force[i] = self._rotor_constant[i] * np.power(self._velocity[i], 2)
+            self._force[i] = self._force_dir[i] * self._rotor_constant[i] * np.power(self._velocity[i], 2)
 
             # Compute the rolling moment coefficient
             self._rolling_moment[i] = -1 * self._rolling_moment_coefficient[i] * np.power(self._velocity[i], 2.0) * self._rot_dir[i]
 
-        # Return the forces and velocities on each rotor and total torque applied on the body frame
+        # Return the forces velocities and moment on each rotor
         return self._force, self._velocity, self._rolling_moment
 
     @property
@@ -120,7 +137,7 @@ class QuadraticThrustCurve(ThrustCurve):
 
     @property
     def rolling_moment(self):
-        """The total rolling moment being generated on the body frame of the vehicle by the rotating propellers
+        """The rolling moment to apply to each rotor of the vehicle at any given time instant
 
         Returns:
             float: The total rolling moment to apply to the vehicle body frame (Torque about the Z-axis) in Nm
