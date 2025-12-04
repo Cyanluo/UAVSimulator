@@ -23,6 +23,7 @@ from pegasus.simulator.params import ROBOTS, SIMULATION_ENVIRONMENTS
 from pegasus.simulator.logic.interface.pegasus_interface import PegasusInterface
 from pegasus.simulator.logic.vehicles.coaxcopter import CoaxCopter, CoaxCopterConfig
 from pegasus.simulator.logic.graphical_sensors.monocular_camera import MonocularCamera
+from pegasus.simulator.logic.sensors.vio import VIO
 from pegasus.simulator.logic.backends.coax_ros1_backend import ROS1CoaxCopterBackend
 
 from pegasus.simulator.logic.backends.ardupilot_mavlink_backend import ArduPilotMavlinkBackendConfig
@@ -73,7 +74,8 @@ class PegasusApp:
             "input_offset": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "input_scaling": [1.0, 1.0, 1.0, 1.0, 900.0, 900.0],
             "zero_position_armed": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "zero_ref": [0.5, 0.5, 0.5, 0.5, 0, 0]
+            "zero_ref": [0.5, 0.5, 0.5, 0.5, 0, 0],
+            "auto_set_home": True
         })
 
         # Create the vehicle
@@ -98,6 +100,7 @@ class PegasusApp:
         # Create a camera and lidar sensors
         config_coaxcopter.graphical_sensors = [
             MonocularCamera("camera", config={"update_rate": 60.0, "depth": True, })]  # Lidar("lidar")
+        config_coaxcopter.sensors.append(VIO(config={"update_rate": 100}))
 
         CoaxCopter(
             "/World/coaxcopter",

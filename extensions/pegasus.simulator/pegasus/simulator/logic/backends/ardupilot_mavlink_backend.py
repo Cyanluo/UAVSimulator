@@ -94,7 +94,15 @@ class SensorMsg:
         self.vision_roll: float = 0.0
         self.vision_pitch: float = 0.0
         self.vision_yaw: float = 0.0
-        self.vision_covariance = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        self.vision_covariance = [0.0] * 21
+
+        # Vision Speed
+        self.vision_vx = 0.0
+        self.vision_vy = 0.0
+        self.vision_vz = 0.0
+
+        # Vision Speed Covariance (3×3 = 9 elements)
+        self.vision_speed_cov = [0.0] * 9
 
         # Simulation State
         self.new_sim_state: bool = False
@@ -238,7 +246,8 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
             >>>  "input_scaling": [1000.0, 1000.0, 1000.0, 1000.0],
             >>>  "zero_position_armed": [100.0, 100.0, 100.0, 100.0],
             >>>  "zero_ref" : [0, 0, 0, 0],
-            >>>  "update_rate": 250.0
+            >>>  "update_rate": 250.0,
+            >>>  "auto_set_home": False
             >>> }
         """
 
@@ -248,7 +257,7 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
         # self.connection_type = config.get("connection_type", "tcp")
         self.connection_ip = config.get("connection_ip", "127.0.0.1")  # TODO working
         self.connection_baseport = config.get(
-            "connection_baseport", 14550
+            "connection_baseport", 14650
         )  # TODO working
         # self.connection_baseport = config.get("connection_baseport", 14551)
         # self.connection_baseport = config.get("connection_baseport", 5760)
@@ -279,6 +288,7 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
         # The update rate at which we will be sending data to mavlink (TODO - remove this from here in the future
         # and infer directly from the function calls)
         self.update_rate: float = config.get("update_rate", 400)  # [Hz]
+        self.auto_set_home: bool = config.get("auto_set_home", False)
 
         carb.log_warn(
             f"[ArduPilotMavlinkBackendConfig] Initialized with vehicle_id={self.vehicle_id}, connection_type={self.connection_type}, connection_ip={self.connection_ip}, connection_baseport={self.connection_baseport}, ardupilot_autolaunch={self.ardupilot_autolaunch}, ardupilot_dir={self.ardupilot_dir}, ardupilot_vehicle_model={self.ardupilot_vehicle_model}, enable_lockstep={self.enable_lockstep}, num_rotors={self.num_rotors}, input_offset={self.input_offset}, input_scaling={self.input_scaling}, zero_position_armed={self.zero_position_armed}, update_rate={self.update_rate}"
@@ -379,6 +389,14 @@ class ArduPilotMavlinkBackend(Backend):
         # The ArduPilotPlugin instance that will be used to communicate with ArduPilot
         self.ap = None
 
+        self.home_lat = 151269321  # Somewhere random
+        self.home_lon = 16624301  # Somewhere random
+        self.home_alt = 163000  # Somewhere random
+
+        self.ekf_ready = False
+        self.home_set = False
+        self.auto_set_home = config.auto_set_home
+
         carb.log_warn(
             f"[ArduPilotMavlinkBackend] Initialized with vehicle_id={self._vehicle_id}, connection_port={self._connection_port}, ardupilot_autolaunch={self.ardupilot_autolaunch}, ardupilot_vehicle_model={self.ardupilot_vehicle_model}, ardupilot_dir={self.ardupilot_dir}, enable_lockstep={self._enable_lockstep}, num_rotors={config.num_rotors}, input_offset={config.input_offset}, input_scaling={config.input_scaling}, zero_position_armed={config.zero_position_armed}, update_rate={self._update_rate}"
         )
@@ -401,6 +419,8 @@ class ArduPilotMavlinkBackend(Backend):
             self.update_bar_data(data)
         elif sensor_type == "Magnetometer":
             self.update_mag_data(data)
+        elif sensor_type == "VIO":
+            self.update_vision_data(data)
         # If the data received is not from one of the above sensors, then this backend does
         # not support that sensor and it will just ignore it
         else:
@@ -492,7 +512,6 @@ class ArduPilotMavlinkBackend(Backend):
 
     def update_vision_data(self, data):
         """Method that 'in the future' will get called by the 'update_sensor' method to update the current Vision data
-        This callback is currently not being called (TODO in a future simulator version)
         Args:
             data (dict): The data produced by an Vision sensor
         """
@@ -504,6 +523,12 @@ class ArduPilotMavlinkBackend(Backend):
         self._sensor_data.vision_roll = data["roll"]
         self._sensor_data.vision_pitch = data["pitch"]
         self._sensor_data.vision_yaw = data["yaw"]
+        self._sensor_data.vision_covariance = data["pose_covariance"]
+
+        self._sensor_data.vision_vx = data["vx"]
+        self._sensor_data.vision_vy = data["vy"]
+        self._sensor_data.vision_vz = data["vz"]
+        self._sensor_data.vision_speed_cov = data["speed_covariance"]
 
         # Signal that we have new vision or mocap data
         self._sensor_data.new_vision_data = True
@@ -664,6 +689,40 @@ class ArduPilotMavlinkBackend(Backend):
             self._received_first_hearbeat = True
             carb.log_warn("Received first hearbeat")
 
+    # Send a mavlink SET_GPS_GLOBAL_ORIGIN message (http://mavlink.org/messages/common#SET_GPS_GLOBAL_ORIGIN), which allows us to use local position information without a GPS.
+    def set_default_global_origin(self):
+        self._connection.mav.set_gps_global_origin_send(
+            1,
+            self.home_lat,
+            self.home_lon,
+            self.home_alt
+        )
+
+    # Send a mavlink SET_HOME_POSITION message (http://mavlink.org/messages/common#SET_HOME_POSITION), which allows us to use local position information without a GPS.
+    def set_default_home_position(self):
+        x = 0
+        y = 0
+        z = 0
+        q = [1, 0, 0, 0]  # w x y z
+
+        approach_x = 0
+        approach_y = 0
+        approach_z = 1
+
+        self._connection.mav.set_home_position_send(
+            1,
+            self.home_lat,
+            self.home_lon,
+            self.home_alt,
+            x,
+            y,
+            z,
+            q,
+            approach_x,
+            approach_y,
+            approach_z
+        )
+
     def update(self, dt):
         """
         Method that is called at every physics step to send data to ArduPilot and receive the control inputs via mavlink
@@ -685,19 +744,22 @@ class ArduPilotMavlinkBackend(Backend):
         _, servos = self.ap.pre_update(sim_time=self._current_utime)
 
         carb.log_info("Checking is Armed")
-        self.update_is_armed()
+        self.handle_messsage()
         carb.log_info("Update Motor Commands")
         self.update_motor_commands(servos)
 
         carb.log_info("Post Update")
         self.ap.post_update(sim_time=self._current_utime, sensor_data=self._sensor_data)
 
-    def update_is_armed(self):
+        self.send_vision_msgs(time_usec=self._current_utime)
+
+    def handle_messsage(self):
         # Use this loop to emulate a do-while loop (make sure this runs at least once)
         msg = self._connection.recv_match(blocking=False)
 
         # If a message was received
         if msg is not None:
+            msg_type = msg.get_type()
             if not self._armed:
                 if (
                     msg.get_type() == "HEARTBEAT"
@@ -711,6 +773,25 @@ class ArduPilotMavlinkBackend(Backend):
                         if self._armed == True:
                             carb.log_warn("Drone is Disarmed.")
                         self._armed = False
+
+            if not self.home_set:
+                # 1. 检查 EKF 是否 ready
+                if msg_type == "EKF_STATUS_REPORT":
+                    if msg.flags & 0b00100000:  # EKF_STATUS_FLAGS_CONST_POS_MODE = bit 5
+                        self.ekf_ready = True
+                if msg_type == "STATUSTEXT":
+                    if "EKF3 IMU1 yaw aligned" in msg.text:
+                        self.ekf_ready = True
+
+                # 2. 检查 home 是否已经设置
+                if msg_type == "HOME_POSITION":
+                    self.home_set = True
+
+                if self.auto_set_home and self.ekf_ready and not self.home_set:
+                    carb.log_info("APM ready → setting home/global origin...")
+                    self.set_default_global_origin()
+                    self.set_default_home_position()
+                    carb.log_info("Home & Origin set.")
 
     def update_motor_commands(self, servos):
         if self._armed and servos != ():
@@ -829,7 +910,6 @@ class ArduPilotMavlinkBackend(Backend):
         Args:
             time_usec (int): The total time elapsed since the simulation started
         """
-        carb.log_info("Sending vision/mocap msgs")
 
         # Do not send vision/mocap data, if not new data was received
         if not self._sensor_data.new_vision_data:
@@ -838,8 +918,8 @@ class ArduPilotMavlinkBackend(Backend):
         self._sensor_data.new_vision_data = False
 
         try:
-            response = self._connection.mav.global_vision_position_estimate_send(
-                time_usec,
+            response = self._connection.mav.vision_position_estimate_send(
+                int(time_usec * 1000000),
                 self._sensor_data.vision_x,
                 self._sensor_data.vision_y,
                 self._sensor_data.vision_z,
@@ -847,6 +927,16 @@ class ArduPilotMavlinkBackend(Backend):
                 self._sensor_data.vision_pitch,
                 self._sensor_data.vision_yaw,
                 self._sensor_data.vision_covariance,
+                reset_counter=0
+            )
+
+            response = self._connection.mav.vision_speed_estimate_send(
+                int(time_usec * 1000000),
+                self._sensor_data.vision_vx,
+                self._sensor_data.vision_vy,
+                self._sensor_data.vision_vz,
+                self._sensor_data.vision_speed_cov,
+                reset_counter=0
             )
         except:
             carb.log_warn("Could not send vision/mocap data through mavlink")

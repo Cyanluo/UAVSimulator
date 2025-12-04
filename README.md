@@ -75,7 +75,9 @@ python examples/11_ardupilot_multi_vehicle.py
 
 ##### 1. 连接地面站
 
-> MavProxy 的转发有问题，所以不直接连接它，而是直接连接 APM 的串口
+> 正常应该会自动使用 UDP 连接地面站，如果没有连接，可以用以下方法
+>
+> 注意使用 UDP 连接会限制 mavlink 数据流的发送频率，如果希望使用大的发送频率，比如 mavros 或者使用 pymavlink 连接时，如果希望比较大的发送频率，直接使用 TCP 连接串口，比如下图中的 SERIAL1 或者 SERIAL2
 
 ![image-20251119110602952](./image/CoaxSimX/image-20251119110602952.png)
 
@@ -96,6 +98,15 @@ python examples/11_ardupilot_multi_vehicle.py
 连接手柄必须使用 QGC，我测试 Mission Planner 的这个功能是有问题的
 
 ![image-20251119111558110](./image/CoaxSimX/image-20251119111558110.png)
+
+##### 3. 加载参数
+
+共轴机型第一次运行要用 MissionPlanner 加载参数，参数放在 `extensions/pegasus.simulator/apm_param`
+
+![image-20251204141443904](./image/CoaxSimX/image-20251204141443904.png)
+
+- coaxExternalNav 使用 VIO 外部定位的参数设置
+- coaxGPS 使用 GPS 做 EKF 位置估计
 
 #### 使用 controller 中的控制器
 
@@ -735,8 +746,3 @@ rospy.set_param("/use_sim_time", True)
 if self._pub_clock:
     self.clock_pub.publish(rospy.Time.from_sec(self.pg.world.current_time))
 ```
-
-
-
-
-

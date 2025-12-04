@@ -70,6 +70,19 @@ class State:
         attitude_frd_ned = rot_ENU_to_NED * Rotation.from_quat(self.attitude) * rot_FLU_to_FRD
         return attitude_frd_ned.as_quat()
 
+    def get_euler_ned_frd(self):
+        """
+        Method that, assuming that a state is encoded in ENU-FLU standard (the Isaac Sim standard),
+        converts the attitude of the vehicle to the NED-FRD convention used by PX4 and other onboard
+        flight controllers, and returns the Euler angles.
+
+        Returns:
+            np.ndarray: A numpy array with the Euler angles [roll, pitch, yaw] representing the
+                        vehicle's attitude in the NED-FRD frame.
+        """
+        attitude_frd_ned = rot_ENU_to_NED * Rotation.from_quat(self.attitude) * rot_FLU_to_FRD
+        return attitude_frd_ned.as_euler("xyz", degrees=False)
+
     def get_linear_body_velocity_ned_frd(self):
         """
         Method that, assuming that a state is encoded in ENU-FLU standard (the Isaac Sim standard), converts the
