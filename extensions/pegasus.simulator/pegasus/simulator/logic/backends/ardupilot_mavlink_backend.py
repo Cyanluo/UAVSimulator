@@ -739,16 +739,11 @@ class ArduPilotMavlinkBackend(Backend):
 
         self._current_utime += dt
 
-        carb.log_info("Pre Update")
-
         _, servos = self.ap.pre_update(sim_time=self._current_utime)
 
-        carb.log_info("Checking is Armed")
         self.handle_messsage()
-        carb.log_info("Update Motor Commands")
         self.update_motor_commands(servos)
 
-        carb.log_info("Post Update")
         self.ap.post_update(sim_time=self._current_utime, sensor_data=self._sensor_data)
 
         self.send_vision_msgs(time_usec=self._current_utime)
