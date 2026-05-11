@@ -19,17 +19,12 @@ class BaseControlBackend(Backend):
         mixer=None,
         hover_position=None,
         yaw_reference=None,
-        takeoff_climb_rate=0.6,
-        takeoff_z_leash=0.3,
-        takeoff_delay=0.0,
-        takeoff_throttle_slew_time=2.0,
-        takeoff_spool_release_throttle=None,
-        takeoff_spool_min_altitude=0.12,
         trajectory_enabled=False,
         trajectory_delay=1.0,
         trajectory_radii=(1.0, 0.8, 0.35),
         trajectory_period=18.0,
         trajectory_ramp_time=3.0,
+        trajectory_log_interval=1.0,
     ):
         super().__init__(config={})
         self.target_height = target_height
@@ -37,24 +32,17 @@ class BaseControlBackend(Backend):
         self.mixer = mixer or CoaxArduPilotMixer()
         self.hover_position = None if hover_position is None else np.asarray(hover_position, dtype=float)
         self.yaw_reference = yaw_reference
-        self.takeoff_climb_rate = float(takeoff_climb_rate)
-        self.takeoff_z_leash = float(takeoff_z_leash)
-        self.takeoff_delay = float(takeoff_delay)
-        self.takeoff_throttle_slew_time = float(takeoff_throttle_slew_time)
-        self.takeoff_spool_release_throttle = takeoff_spool_release_throttle
-        self.takeoff_spool_min_altitude = float(takeoff_spool_min_altitude)
         self.trajectory_enabled = bool(trajectory_enabled)
         self.trajectory_delay = float(trajectory_delay)
         self.trajectory_radii = np.asarray(trajectory_radii, dtype=float)
         self.trajectory_period = float(trajectory_period)
         self.trajectory_ramp_time = float(trajectory_ramp_time)
+        self.trajectory_log_interval = float(trajectory_log_interval)
         self.trajectory_origin = None
         self.trajectory_start_time = None
         self.trajectory_yaw = None
         self.trajectory_tracking_started = False
-        self.takeoff_target = None
-        self.takeoff_spool_active = False
-        self.takeoff_spool_throttle = 0.0
+        self.next_trajectory_log_time = None
         self.hold_target = None
         self.state = None
         self.cmd = None
@@ -63,24 +51,21 @@ class BaseControlBackend(Backend):
     def take_off(self, height):
         if self.vehicle is None or self.vehicle.vehicle_state != MultirotorState.LAND:
             return False
-        if self._sim_time() < self.takeoff_delay:
-            return False
 
         state = self.state if self.state is not None else self.vehicle.state
         target_z = self.target_height if self.target_height is not None else height
         current_position = np.asarray(state.position, dtype=float)
-        self.takeoff_target = current_position.copy()
-        self.takeoff_target[2] = target_z
-        self.hold_target = self.takeoff_target.copy()
+        target_position = current_position.copy()
+        target_position[2] = target_z
+        self.hold_target = target_position.copy()
+        self._start_trajectory(self.hold_target)
         self.cmd = [
-            current_position.copy(),
+            target_position,
             np.zeros(3),
             np.zeros(3),
             self._current_yaw() if self.yaw_reference is None else self.yaw_reference,
             0.0,
         ]
-        self.takeoff_spool_active = True
-        self.takeoff_spool_throttle = 0.0
         return True
 
     def hold(self):
@@ -119,11 +104,6 @@ class BaseControlBackend(Backend):
         return self.input_ref
 
     def update(self, dt: float):
-        if self.takeoff_spool_active:
-            self._update_takeoff_spool(dt)
-            return
-
-        self._update_takeoff_reference(dt)
         self._update_trajectory_reference()
         control = self.controller.update(dt, self.cmd)
         if control is None:
@@ -133,38 +113,48 @@ class BaseControlBackend(Backend):
             force, torques = control
             if self.vehicle:
                 self.input_ref = self.vehicle.force_and_torques_to_velocities(force, torques)
+                if hasattr(self.controller, "append_actuator_statistics") and isinstance(self.input_ref, dict):
+                    self.controller.append_actuator_statistics(self.input_ref)
             return
 
-        roll, pitch, yaw, throttle = control
-        self.input_ref = self.mixer.mix(roll, pitch, yaw, throttle)
+        roll, pitch, yaw, throttle = control[:4]
+        if len(control) >= 6:
+            fx, fy = control[4:6]
+            try:
+                self.input_ref = self.mixer.mix(roll, pitch, yaw, throttle, fx=fx, fy=fy)
+            except TypeError:
+                self.input_ref = self.mixer.mix(roll, pitch, yaw, throttle)
+        else:
+            self.input_ref = self.mixer.mix(roll, pitch, yaw, throttle)
+        if hasattr(self.controller, "append_actuator_statistics"):
+            self.controller.append_actuator_statistics(self.input_ref)
+        if hasattr(self.controller, "append_allocation_statistics"):
+            self.controller.append_allocation_statistics(self.mixer)
 
     def start(self):
         self.input_ref = self._zero_input_reference()
+        carb.log_warn(f"BaseControlBackend mixer: {type(self.mixer).__name__}")
         self.controller.start()
 
     def stop(self):
         self.cmd = None
-        self.takeoff_target = None
-        self.takeoff_spool_active = False
-        self.takeoff_spool_throttle = 0.0
         self.hold_target = None
         self.trajectory_origin = None
         self.trajectory_start_time = None
         self.trajectory_yaw = None
         self.trajectory_tracking_started = False
+        self.next_trajectory_log_time = None
         self.input_ref = self._zero_input_reference()
         self.controller.stop()
 
     def reset(self):
         self.cmd = None
-        self.takeoff_target = None
-        self.takeoff_spool_active = False
-        self.takeoff_spool_throttle = 0.0
         self.hold_target = None
         self.trajectory_origin = None
         self.trajectory_start_time = None
         self.trajectory_yaw = None
         self.trajectory_tracking_started = False
+        self.next_trajectory_log_time = None
         self.input_ref = self._zero_input_reference()
         self.controller.reset()
 
@@ -173,52 +163,6 @@ class BaseControlBackend(Backend):
             return 0.0
         return float(self.vehicle.pg.world.current_time)
 
-    def _update_takeoff_reference(self, dt):
-        if self.takeoff_target is None or self.cmd is None or dt <= 0.0:
-            return
-
-        current_target = self.cmd[0].copy()
-        state_z = self.state.position[2] if self.state is not None else current_target[2]
-        remaining = self.takeoff_target[2] - current_target[2]
-        step = self.takeoff_climb_rate * dt
-        if abs(remaining) <= step:
-            current_target[2] = self.takeoff_target[2]
-            self.takeoff_target = None
-        else:
-            desired_z = current_target[2] + self.takeoff_climb_rate * np.sign(remaining) * dt
-            leash_z = state_z + self.takeoff_z_leash
-            current_target[2] = min(desired_z, leash_z, self.takeoff_target[2])
-
-        self.cmd[0] = current_target
-        self.cmd[1] = np.zeros(3)
-
-    def _update_takeoff_spool(self, dt):
-        if dt <= 0.0:
-            return
-
-        slew_time = max(self.takeoff_throttle_slew_time, 1e-3)
-        self.takeoff_spool_throttle = min(1.0, self.takeoff_spool_throttle + dt / slew_time)
-        self.input_ref = self.mixer.mix(0.0, 0.0, 0.0, self.takeoff_spool_throttle)
-
-        release_throttle = self.takeoff_spool_release_throttle
-        if release_throttle is None:
-            release_throttle = getattr(self.controller, "hover_percentage", 0.48) + 0.03
-
-        altitude = self.state.position[2] if self.state is not None else 0.0
-        if self.takeoff_spool_throttle < release_throttle and altitude < self.takeoff_spool_min_altitude:
-            return
-
-        self.takeoff_spool_active = False
-        self.controller.start()
-        if hasattr(self.controller, "filtered_throttle"):
-            self.controller.filtered_throttle = float(self.takeoff_spool_throttle)
-        if self.state is not None and self.cmd is not None:
-            current_position = np.asarray(self.state.position, dtype=float)
-            self.cmd[0] = current_position.copy()
-            if self.takeoff_target is not None and self.takeoff_target[2] > current_position[2]:
-                self.cmd[0][2] = min(current_position[2] + self.takeoff_z_leash, self.takeoff_target[2])
-            self.cmd[1] = np.zeros(3)
-
     def _start_trajectory(self, origin):
         if not self.trajectory_enabled:
             return
@@ -226,6 +170,7 @@ class BaseControlBackend(Backend):
         self.trajectory_start_time = self._sim_time()
         self.trajectory_yaw = self._current_yaw() if self.yaw_reference is None else self.yaw_reference
         self.trajectory_tracking_started = False
+        self.next_trajectory_log_time = None
 
     def _update_trajectory_reference(self):
         if not self.trajectory_enabled or self.trajectory_origin is None or self.trajectory_start_time is None:
@@ -246,11 +191,13 @@ class BaseControlBackend(Backend):
 
         if not self.trajectory_tracking_started:
             self.trajectory_tracking_started = True
+            self.next_trajectory_log_time = 0.0
             carb.log_warn(
                 "BaseControlBackend: trajectory tracking started "
                 f"at t={self._sim_time():.2f}s, origin={self.trajectory_origin.tolist()}, "
                 f"radii={self.trajectory_radii.tolist()}, period={self.trajectory_period:.2f}s"
             )
+        self._log_trajectory_time(t)
 
         p_ref, v_ref, a_ref = self._trajectory_sample(t)
         self.cmd = [
@@ -261,14 +208,54 @@ class BaseControlBackend(Backend):
             0.0,
         ]
 
+    def _log_trajectory_time(self, trajectory_time):
+        if self.trajectory_log_interval <= 0.0:
+            return
+        if self.next_trajectory_log_time is None:
+            self.next_trajectory_log_time = 0.0
+        if trajectory_time + 1.0e-9 < self.next_trajectory_log_time:
+            return
+
+        carb.log_warn(
+            "BaseControlBackend: trajectory running "
+            f"sim_t={self._sim_time():.2f}s, traj_t={trajectory_time:.2f}s"
+        )
+        while self.next_trajectory_log_time <= trajectory_time + 1.0e-9:
+            self.next_trajectory_log_time += self.trajectory_log_interval
+
     def _trajectory_sample(self, t):
         omega = 2.0 * np.pi / max(self.trajectory_period, 1e-3)
-        phase = np.array([omega * t, 0.5 * omega * t, 0.75 * omega * t])
         radii = self.trajectory_radii
 
-        base = radii * np.sin(phase)
-        base_d = radii * np.array([omega, 0.5 * omega, 0.75 * omega]) * np.cos(phase)
-        base_dd = -radii * np.array([omega, 0.5 * omega, 0.75 * omega]) ** 2 * np.sin(phase)
+        freqs = np.array(
+            [
+                [1.00, 1.29, 1.57],
+                [1.17, 0.79, 1.43],
+                [0.63, 1.11, 1.49],
+            ],
+            dtype=float,
+        )
+        amps = np.array(
+            [
+                [0.68, 0.24, 0.06],
+                [0.62, 0.26, 0.07],
+                [0.58, 0.20, 0.06],
+            ],
+            dtype=float,
+        )
+        phases = np.array(
+            [
+                [0.0, 1.7, 4.1],
+                [2.2, 0.4, 5.0],
+                [1.1, 3.3, 0.8],
+            ],
+            dtype=float,
+        )
+
+        wt = freqs * omega * t + phases
+        base = radii * np.sum(amps * np.sin(wt), axis=1)
+        base_d = radii * np.sum(amps * freqs * omega * np.cos(wt), axis=1)
+        base_dd = -radii * np.sum(amps * (freqs * omega) ** 2 * np.sin(wt), axis=1)
 
         ramp, ramp_d, ramp_dd = self._smooth_ramp(t)
         p_ref = self.trajectory_origin + ramp * base

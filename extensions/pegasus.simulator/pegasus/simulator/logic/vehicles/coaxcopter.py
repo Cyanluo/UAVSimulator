@@ -96,10 +96,8 @@ class CoaxCopter(Vehicle):
         self._drag = config.drag
         self._num_servo = config.num_servo
         self.pg = PegasusInterface()
-        self.take_off_flag = False
         self.camera_pos = np.array([5.0, 4.0, 0.3])
         self.camera_target = np.array([3.3, 0.0, 0.3])
-        self._target_take_off_height = 0
 
         # vehicle state: 0:land  1:flying  2:collision
         self._vehicle_state = MultirotorState.LAND
@@ -125,11 +123,6 @@ class CoaxCopter(Vehicle):
         # if self.pg.world.current_time > 2:
         if self._vehicle_state == MultirotorState.LAND:
             self.take_off(3.0)
-
-        if self._vehicle_state == MultirotorState.TAKE_OFF:
-            if self._state.position[2] > (self._target_take_off_height-0.01):
-                self._backends[0].hold()
-                self._vehicle_state = MultirotorState.FLYING
 
         # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
         desired_drive_val = dict()
@@ -282,5 +275,4 @@ class CoaxCopter(Vehicle):
     def take_off(self, height):
         if len(self._backends) != 0:
             if self._backends[0].take_off(height):
-                self._target_take_off_height = height
-                self._vehicle_state = MultirotorState.TAKE_OFF
+                self._vehicle_state = MultirotorState.FLYING

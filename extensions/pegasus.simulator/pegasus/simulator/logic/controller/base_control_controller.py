@@ -3,7 +3,6 @@ import csv
 
 import carb
 import numpy as np
-from scipy.linalg import solve_continuous_are
 from scipy.spatial.transform import Rotation
 
 from pegasus.simulator.logic.state import State
@@ -12,10 +11,9 @@ from pegasus.simulator.logic.state import State
 class BaseControlController:
     """Base-control law for CoaxCopter simulation.
 
-    The controller is intentionally independent from the actuator allocator.
-    It computes normalized throttle, roll, pitch and yaw demands that can be
-    consumed by the temporary ArduPilot-style mixer or by the future paper
-    Levenberg-Marquardt allocator.
+    The controller is intentionally independent from the actuator allocator and
+    uses the ArduPilot-style attitude PID path only. It computes normalized
+    throttle, roll, pitch and yaw demands for whichever mixer the backend uses.
     """
 
     def __init__(
@@ -25,14 +23,6 @@ class BaseControlController:
         Kv=(1.5, 1.5, 1.5),
         Kvi=(0.2, 0.2, 0.2),
         Kvd=(0.0, 0.0, 0.0),
-        Kr=(53.0, 75.0, 40.0),
-        Kir=(10.0, 10.0, 15.0),
-        Kdr=(0.1, 0.6, 0.05),
-        Kw=(0.013, 0.013, 0.01),
-        Kiw=(0.002, 0.002, 0.0015),
-        Kdw=(0.000008, 0.000006, 0.00015),
-        attitude_control_mode="cascade_pid",
-        attitude_integral_limit=(0.3, 0.3, 0.3),
         apm_xy_posvel_controller=None,
         apm_xy_pos_p=1.0,
         apm_xy_vel_p=1.2,
@@ -46,16 +36,10 @@ class BaseControlController:
         ap_rate_d=(0.00324, 0.00324, 0.0),
         ap_rate_imax=(0.45, 0.45, 0.45),
         ap_rate_filter_hz=(20.0, 20.0, 2.5),
-        lqr_kRP=3.0,
-        lqr_kRI=0.8,
-        lqr_q=(4.0, 4.0, 2.0, 80.0, 80.0, 35.0, 4.0, 4.0, 2.0),
-        lqr_ru=(1.0, 1.0, 1.0),
         max_tilt_deg=25.0,
         hover_percentage=0.48,
         mass=1.30,
         gravity=9.81,
-        inertia=(0.03, 0.03, 0.05),
-        torque_scale=(0.018, 0.014, 0.020),
         yaw_rate_gain=0.0,
         output_mode="normalized",
         apm_height_priority=None,
@@ -71,10 +55,10 @@ class BaseControlController:
         apm_z_use_accel_feedback=True,
         command_z_leash=None,
         throttle_filter_hz=2.0,
-        takeoff_min_throttle=None,
-        takeoff_altitude_gate=0.8,
-        takeoff_error_gate=0.25,
-        z_priority_takeoff=True,
+        direct_lateral_force_ratio=0.0,
+        direct_lateral_force_ratio_y=None,
+        lateral_force_limit=0.35,
+        lateral_force_filter_hz=1.5,
         apply_angle_boost=True,
         angle_boost_min_cos=0.1,
     ):
@@ -82,16 +66,8 @@ class BaseControlController:
         self.Kv = np.diag(Kv)
         self.Kvi = np.diag(Kvi)
         self.Kvd = np.diag(Kvd)
-        self.Kr = np.diag(Kr)
-        self.Kir = np.diag(Kir)
-        self.Kdr = np.diag(Kdr)
-        self.Kw = np.diag(Kw)
-        self.Kiw = np.diag(Kiw)
-        self.Kdw = np.diag(Kdw)
-        self.attitude_control_mode = attitude_control_mode
-        self.attitude_integral_limit = np.asarray(attitude_integral_limit, dtype=float)
         if apm_xy_posvel_controller is None:
-            apm_xy_posvel_controller = attitude_control_mode == "ardupilot_pid"
+            apm_xy_posvel_controller = True
         self.apm_xy_posvel_controller = bool(apm_xy_posvel_controller)
         self.apm_xy_pos_p = float(apm_xy_pos_p)
         self.apm_xy_vel_p = float(apm_xy_vel_p)
@@ -105,26 +81,19 @@ class BaseControlController:
         self.ap_rate_d = np.asarray(ap_rate_d, dtype=float)
         self.ap_rate_imax = np.asarray(ap_rate_imax, dtype=float)
         self.ap_rate_filter_hz = np.asarray(ap_rate_filter_hz, dtype=float)
-        self.lqr_kRP = float(lqr_kRP)
-        self.lqr_kRI = float(lqr_kRI)
-        self.lqr_q = np.asarray(lqr_q, dtype=float)
-        self.lqr_ru = np.asarray(lqr_ru, dtype=float)
-        self.lqr_gain = self._build_lqr_gain()
 
         self.max_tilt = np.deg2rad(max_tilt_deg)
         self.hover_percentage = hover_percentage
         self.m = mass
         self.g = gravity
-        self.inertia = np.diag(inertia) if np.asarray(inertia).ndim == 1 else np.asarray(inertia, dtype=float)
         self.acc2thr = self.g / self.hover_percentage
-        self.torque_scale = np.asarray(torque_scale, dtype=float)
         self.yaw_rate_gain = yaw_rate_gain
         self.output_mode = output_mode
         if apm_height_priority is None:
-            apm_height_priority = attitude_control_mode == "ardupilot_pid"
+            apm_height_priority = True
         self.apm_height_priority = bool(apm_height_priority)
         if apm_z_accel_controller is None:
-            apm_z_accel_controller = attitude_control_mode == "ardupilot_pid"
+            apm_z_accel_controller = True
         self.apm_z_accel_controller = bool(apm_z_accel_controller)
         self.apm_z_pos_p = float(apm_z_pos_p)
         self.apm_z_vel_p = float(apm_z_vel_p)
@@ -137,12 +106,12 @@ class BaseControlController:
         self.apm_z_use_accel_feedback = bool(apm_z_use_accel_feedback)
         self.command_z_leash = None if command_z_leash is None else float(command_z_leash)
         self.throttle_filter_hz = float(throttle_filter_hz)
-        if takeoff_min_throttle is None:
-            takeoff_min_throttle = hover_percentage + 0.05
-        self.takeoff_min_throttle = float(takeoff_min_throttle)
-        self.takeoff_altitude_gate = float(takeoff_altitude_gate)
-        self.takeoff_error_gate = float(takeoff_error_gate)
-        self.z_priority_takeoff = bool(z_priority_takeoff)
+        self.direct_lateral_force_ratio = float(np.clip(direct_lateral_force_ratio, 0.0, 1.0))
+        if direct_lateral_force_ratio_y is None:
+            direct_lateral_force_ratio_y = direct_lateral_force_ratio
+        self.direct_lateral_force_ratio_y = float(np.clip(direct_lateral_force_ratio_y, 0.0, 1.0))
+        self.lateral_force_limit = float(lateral_force_limit)
+        self.lateral_force_filter_hz = float(lateral_force_filter_hz)
         self.apply_angle_boost = bool(apply_angle_boost)
         self.angle_boost_min_cos = float(angle_boost_min_cos)
 
@@ -154,10 +123,6 @@ class BaseControlController:
         self.received_first_state = False
 
         self.position_error_int = np.zeros(3)
-        self.eR_int = np.zeros(3)
-        self.ew_int = np.zeros(3)
-        self.prev_eR = np.zeros(3)
-        self.prev_ew = np.zeros(3)
         self.prev_ev = np.zeros(3)
         self.apm_xy_vel_int = np.zeros(2)
         self.apm_xy_filtered_vel_error = np.zeros(2)
@@ -170,6 +135,7 @@ class BaseControlController:
         self.apm_z_filtered_accel_error = 0.0
         self.apm_z_prev_filtered_accel_error = 0.0
         self.filtered_throttle = self.hover_percentage
+        self.filtered_lateral_force = np.zeros(2)
         self.total_time = 0.0
 
         if results_file is not None:
@@ -181,6 +147,8 @@ class BaseControlController:
         self.position_over_time = []
         self.desired_position_over_time = []
         self.position_error_over_time = []
+        self.velocity_over_time = []
+        self.desired_velocity_over_time = []
         self.velocity_error_over_time = []
         self.attitude_error_over_time = []
         self.attitude_rate_error_over_time = []
@@ -189,15 +157,17 @@ class BaseControlController:
         self.angular_rate_over_time = []
         self.desired_angular_rate_over_time = []
         self.control_over_time = []
+        self.actuator_over_time = []
+        self.allocation_time_vector = []
+        self.allocation_target_over_time = []
+        self.allocation_allocated_over_time = []
+        self.allocation_residual_over_time = []
+        self.allocation_norm_over_time = []
         self.last_w_des = np.zeros(3)
 
     def start(self):
         self.reset_statistics()
         self.position_error_int = np.zeros(3)
-        self.eR_int = np.zeros(3)
-        self.ew_int = np.zeros(3)
-        self.prev_eR = np.zeros(3)
-        self.prev_ew = np.zeros(3)
         self.prev_ev = np.zeros(3)
         self.apm_xy_vel_int = np.zeros(2)
         self.apm_xy_filtered_vel_error = np.zeros(2)
@@ -210,6 +180,7 @@ class BaseControlController:
         self.apm_z_filtered_accel_error = 0.0
         self.apm_z_prev_filtered_accel_error = 0.0
         self.filtered_throttle = self.hover_percentage
+        self.filtered_lateral_force = np.zeros(2)
 
     def stop(self):
         self.received_first_state = False
@@ -221,6 +192,8 @@ class BaseControlController:
                 p=np.vstack(self.position_over_time),
                 desired_p=np.vstack(self.desired_position_over_time),
                 ep=np.vstack(self.position_error_over_time),
+                v=np.vstack(self.velocity_over_time),
+                desired_v=np.vstack(self.desired_velocity_over_time),
                 ev=np.vstack(self.velocity_error_over_time),
                 er=np.vstack(self.attitude_error_over_time),
                 ew=np.vstack(self.attitude_rate_error_over_time),
@@ -229,8 +202,10 @@ class BaseControlController:
                 angular_rate=np.vstack(self.angular_rate_over_time),
                 desired_angular_rate=np.vstack(self.desired_angular_rate_over_time),
                 control=np.vstack(self.control_over_time),
+                actuator=np.vstack(self.actuator_over_time),
             )
             self._save_csv_statistics()
+            self._save_allocation_csv_statistics()
             carb.log_warn("Base control statistics saved to: " + self.results_file)
         self.reset_statistics()
 
@@ -260,17 +235,8 @@ class BaseControlController:
         ev_d = (ev - self.prev_ev) / dt
         self.prev_ev = ev
 
-        takeoff_window = self._in_takeoff_window(p_des[2])
-        near_ground_takeoff = p_des[2] >= self.p[2] and self.p[2] < self.takeoff_altitude_gate
-
         if self.apm_xy_posvel_controller:
             accel_xy = self._apm_xy_accel(p_des[:2], v_des[:2], a_des[:2], dt)
-            xy_scale = self._takeoff_xy_scale(p_des[2])
-            if self.z_priority_takeoff and xy_scale < 1.0:
-                accel_xy *= xy_scale
-                self.apm_xy_vel_int *= max(0.0, 1.0 - 2.0 * dt)
-            elif not self.z_priority_takeoff:
-                accel_xy *= xy_scale
             accel_z = -(self.Kp[2, 2] * ep[2]) - (self.Kv[2, 2] * ev[2])
             accel_z += -(self.Kvi[2, 2] * self.position_error_int[2]) - (self.Kvd[2, 2] * ev_d[2]) + a_des[2]
             accel_target = np.array([accel_xy[0], accel_xy[1], accel_z])
@@ -278,17 +244,28 @@ class BaseControlController:
             accel_target = -(self.Kp @ ep) - (self.Kv @ ev) - (self.Kvi @ self.position_error_int)
             accel_target += -(self.Kvd @ ev_d) + a_des
 
+        direct_lateral_accel = np.array(
+            [
+                self.direct_lateral_force_ratio * accel_target[0],
+                self.direct_lateral_force_ratio_y * accel_target[1],
+            ],
+            dtype=float,
+        )
+        attitude_accel_target = accel_target.copy()
+        attitude_accel_target[:2] -= direct_lateral_accel
+        fx_des, fy_des = self._lateral_force_command(direct_lateral_accel, yaw_des, dt)
+
         if self.apm_height_priority:
-            attitude_accel = np.array([accel_target[0], accel_target[1], self.g])
+            attitude_accel = np.array([attitude_accel_target[0], attitude_accel_target[1], self.g])
             if self.apm_z_accel_controller:
-                throttle_direct = self._apm_z_throttle(p_des[2], v_des[2], a_des[2], dt, takeoff_window)
+                throttle_direct = self._apm_z_throttle(p_des[2], v_des[2], a_des[2], dt)
                 collective_accel = None
             else:
                 throttle_direct = None
-                collective_accel = float(accel_target[2] + self.g)
+                collective_accel = float(attitude_accel_target[2] + self.g)
         else:
             throttle_direct = None
-            attitude_accel = accel_target + np.array([0.0, 0.0, self.g])
+            attitude_accel = attitude_accel_target + np.array([0.0, 0.0, self.g])
             collective_accel = None
 
         b3_des = self._limit_tilt(attitude_accel)
@@ -296,8 +273,6 @@ class BaseControlController:
 
         R = self.R.as_matrix()
         e_R = 0.5 * self.vee(R_des.T @ R - R.T @ R_des)
-        self.eR_int += e_R * dt
-        self.eR_int = np.clip(self.eR_int, -self.attitude_integral_limit, self.attitude_integral_limit)
         tau_cmd, e_w = self._attitude_control(R, R_des, e_R, yaw_rate_des, dt)
 
         if throttle_direct is not None:
@@ -313,33 +288,40 @@ class BaseControlController:
                 collective_accel = self._angle_boost_value(collective_accel, R, R_des)
             throttle = float(np.clip(collective_accel / self.acc2thr, 0.0, 1.0))
         throttle = self._filter_throttle(throttle, dt)
-        if takeoff_window or near_ground_takeoff:
-            throttle = max(throttle, self.takeoff_min_throttle)
-            if self.takeoff_min_throttle > 0.0:
-                self.filtered_throttle = throttle
+        target_v = np.zeros(3)
+        if self.apm_xy_posvel_controller:
+            target_v[:2] = self.apm_xy_pos_p * -ep[:2] + v_des[:2]
+        else:
+            target_v[:2] = v_des[:2]
+        
+        if self.apm_z_accel_controller:
+            target_v[2] = self.apm_z_pos_p * -ep[2] + v_des[2]
+        else:
+            target_v[2] = v_des[2]
+            
+        real_ev = target_v - self.v
+
         if self.output_mode == "force_torque":
             force = throttle
             torques = np.clip(tau_cmd, -1.0, 1.0)
-            self._append_statistics(p_des, ep, ev, R, R_des, e_R, e_w, np.r_[torques, force])
+            self._append_statistics(p_des, target_v, ep, real_ev, R, R_des, e_R, e_w, np.r_[torques, force])
             return force, torques
 
-        if self.attitude_control_mode == "ardupilot_pid":
-            roll = float(np.clip(tau_cmd[0], -1.0, 1.0))
-            pitch = float(np.clip(tau_cmd[1], -1.0, 1.0))
-            yaw = float(np.clip(tau_cmd[2] + self.yaw_rate_gain * yaw_rate_des, -1.0, 1.0))
-        else:
-            roll = float(np.clip(tau_cmd[0] * self.torque_scale[0], -1.0, 1.0))
-            pitch = float(np.clip(tau_cmd[1] * self.torque_scale[1], -1.0, 1.0))
-            yaw = float(np.clip(tau_cmd[2] * self.torque_scale[2] + self.yaw_rate_gain * yaw_rate_des, -1.0, 1.0))
+        roll = float(np.clip(tau_cmd[0], -1.0, 1.0))
+        pitch = float(np.clip(tau_cmd[1], -1.0, 1.0))
+        yaw = float(np.clip(tau_cmd[2] + self.yaw_rate_gain * yaw_rate_des, -1.0, 1.0))
 
-        self._append_statistics(p_des, ep, ev, R, R_des, e_R, e_w, np.array([roll, pitch, yaw, throttle]))
-        return roll, pitch, yaw, throttle
+        control = np.array([roll, pitch, yaw, throttle, fx_des, fy_des])
+        self._append_statistics(p_des, target_v, ep, real_ev, R, R_des, e_R, e_w, control)
+        return roll, pitch, yaw, throttle, fx_des, fy_des
 
-    def _append_statistics(self, p_des, ep, ev, R, R_des, e_R, e_w, control):
+    def _append_statistics(self, p_des, v_des, ep, ev, R, R_des, e_R, e_w, control):
         self.time_vector.append(self.total_time)
         self.position_over_time.append(self.p.copy())
         self.desired_position_over_time.append(p_des.copy())
         self.position_error_over_time.append(ep.copy())
+        self.velocity_over_time.append(self.v.copy())
+        self.desired_velocity_over_time.append(v_des.copy())
         self.velocity_error_over_time.append(ev.copy())
         self.attitude_error_over_time.append(e_R.copy())
         self.attitude_rate_error_over_time.append(e_w.copy())
@@ -348,6 +330,40 @@ class BaseControlController:
         self.angular_rate_over_time.append(self.w.copy())
         self.desired_angular_rate_over_time.append(self.last_w_des.copy())
         self.control_over_time.append(control.copy())
+        self.actuator_over_time.append(np.full(4, np.nan))
+
+    def append_actuator_statistics(self, input_ref):
+        rotor = np.asarray(input_ref.get("rotor", [np.nan, np.nan]), dtype=float)
+        servo = np.asarray(input_ref.get("servo", [np.nan, np.nan]), dtype=float)
+        actuator = np.array([rotor[0], rotor[1], servo[0], servo[1]], dtype=float)
+
+        if len(self.actuator_over_time) < len(self.time_vector):
+            self.actuator_over_time.append(actuator)
+        elif self.actuator_over_time:
+            self.actuator_over_time[-1] = actuator
+
+    def append_allocation_statistics(self, mixer):
+        if not hasattr(mixer, "last_target_wrench"):
+            return
+        target = np.asarray(mixer.last_target_wrench, dtype=float)
+        allocated = np.asarray(mixer.last_allocated_wrench, dtype=float)
+        residual = np.asarray(mixer.last_residual, dtype=float)
+        if target.shape[0] != 6 or allocated.shape[0] != 6 or residual.shape[0] != 6:
+            return
+
+        self.allocation_time_vector.append(self.total_time)
+        self.allocation_target_over_time.append(target.copy())
+        self.allocation_allocated_over_time.append(allocated.copy())
+        self.allocation_residual_over_time.append(residual.copy())
+        self.allocation_norm_over_time.append(
+            np.array(
+                [
+                    getattr(mixer, "last_raw_residual_norm", np.nan),
+                    getattr(mixer, "last_weighted_residual_norm", np.nan),
+                ],
+                dtype=float,
+            )
+        )
 
     def _save_csv_statistics(self):
         csv_file = os.path.splitext(self.results_file)[0] + ".csv"
@@ -364,6 +380,12 @@ class BaseControlController:
             "ep_x",
             "ep_y",
             "ep_z",
+            "v_x",
+            "v_y",
+            "v_z",
+            "v_des_x",
+            "v_des_y",
+            "v_des_z",
             "ev_x",
             "ev_y",
             "ev_z",
@@ -389,6 +411,12 @@ class BaseControlController:
             "control_1",
             "control_2",
             "control_3",
+            "control_force_x",
+            "control_force_y",
+            "rotor_0",
+            "rotor_1",
+            "servo_0",
+            "servo_1",
         ]
 
         with open(csv_file, "w", newline="") as stream:
@@ -399,6 +427,8 @@ class BaseControlController:
                 self.position_over_time,
                 self.desired_position_over_time,
                 self.position_error_over_time,
+                self.velocity_over_time,
+                self.desired_velocity_over_time,
                 self.velocity_error_over_time,
                 self.attitude_over_time,
                 self.desired_attitude_over_time,
@@ -407,13 +437,16 @@ class BaseControlController:
                 self.desired_angular_rate_over_time,
                 self.attitude_rate_error_over_time,
                 self.control_over_time,
+                self.actuator_over_time,
             ):
-                time, p, p_des, ep, ev, attitude, desired_attitude, e_R, w, w_des, e_w, control = row
+                time, p, p_des, ep, v, desired_v, ev, attitude, desired_attitude, e_R, w, w_des, e_w, control, actuator = row
                 writer.writerow(
                     [time]
                     + list(p)
                     + list(p_des)
                     + list(ep)
+                    + list(v)
+                    + list(desired_v)
                     + list(ev)
                     + list(attitude)
                     + list(desired_attitude)
@@ -422,8 +455,38 @@ class BaseControlController:
                     + list(w_des)
                     + list(e_w)
                     + list(control)
+                    + list(actuator)
                 )
         carb.log_warn("Base control CSV statistics saved to: " + csv_file)
+
+    def _save_allocation_csv_statistics(self):
+        if self.results_file is None or len(self.allocation_time_vector) == 0:
+            return
+
+        csv_file = os.path.splitext(self.results_file)[0] + "_allocation.csv"
+        os.makedirs(os.path.dirname(csv_file), exist_ok=True)
+        axes = ["fx", "fy", "fz", "mx", "my", "mz"]
+        header = (
+            ["time"]
+            + [f"target_{axis}" for axis in axes]
+            + [f"allocated_{axis}" for axis in axes]
+            + [f"residual_{axis}" for axis in axes]
+            + ["residual_norm", "weighted_residual_norm"]
+        )
+
+        with open(csv_file, "w", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(header)
+            for row in zip(
+                self.allocation_time_vector,
+                self.allocation_target_over_time,
+                self.allocation_allocated_over_time,
+                self.allocation_residual_over_time,
+                self.allocation_norm_over_time,
+            ):
+                time, target, allocated, residual, norms = row
+                writer.writerow([time] + list(target) + list(allocated) + list(residual) + list(norms))
+        carb.log_warn("Base control allocation CSV saved to: " + csv_file)
 
     def _parse_cmd(self, cmd):
         if len(cmd) == 6:
@@ -452,44 +515,27 @@ class BaseControlController:
         v_limited[2] = min(0.0, v_limited[2])
         return p_limited, v_limited
 
+    def _lateral_force_command(self, lateral_accel_world, yaw_des, dt):
+        if self.direct_lateral_force_ratio <= 0.0:
+            self.filtered_lateral_force = np.zeros(2)
+            return 0.0, 0.0
+
+        scale = 2.0 * self.hover_percentage / max(self.g, 1e-6)
+        force_world = scale * np.array([lateral_accel_world[0], lateral_accel_world[1], 0.0], dtype=float)
+        yaw_rotation = Rotation.from_euler("Z", yaw_des).as_matrix()
+        force_body = yaw_rotation.T @ force_world
+        force_body_xy = self._first_order_filter(
+            self.filtered_lateral_force,
+            force_body[:2],
+            self.lateral_force_filter_hz,
+            dt,
+        )
+        self.filtered_lateral_force = np.asarray(force_body_xy, dtype=float)
+        force_body_xy = np.clip(force_body_xy, -self.lateral_force_limit, self.lateral_force_limit)
+        return float(force_body_xy[0]), float(force_body_xy[1])
+
     def _attitude_control(self, R, R_des, e_R, yaw_rate_des, dt):
-        if self.attitude_control_mode == "ardupilot_pid":
-            return self._ardupilot_pid_control(R, R_des, e_R, yaw_rate_des, dt)
-
-        if self.attitude_control_mode == "cascade_pid":
-            eR_d = (e_R - self.prev_eR) / dt
-            self.prev_eR = e_R
-            w_des = -1.0 * (self.Kr @ e_R + self.Kir @ self.eR_int + self.Kdr @ eR_d)
-            w_des[2] += yaw_rate_des
-            self.last_w_des = w_des.copy()
-
-            e_w = self.w - w_des
-            self.ew_int += e_w * dt
-            ew_d = (e_w - self.prev_ew) / dt
-            self.prev_ew = e_w
-
-            tau_cmd = -1.0 * (self.Kw @ e_w + self.Kiw @ self.ew_int + self.Kdw @ ew_d)
-            return tau_cmd, e_w
-
-        w_des = np.array([0.0, 0.0, yaw_rate_des])
-        w_des_body = R.T @ R_des @ w_des
-        self.last_w_des = w_des_body.copy()
-        e_w = self.w - w_des_body
-
-        if self.attitude_control_mode == "pd":
-            return -(self.Kr @ e_R) - (self.Kw @ e_w), e_w
-        if self.attitude_control_mode != "lqr":
-            carb.log_warn("Unknown attitude_control_mode, falling back to lqr: " + str(self.attitude_control_mode))
-
-        error_rotation = R_des.T @ R
-        omega_hat = self.hat(self.w)
-        eI_hat = self.hat(self.eR_int)
-        e_omega_matrix = self.lqr_kRP * error_rotation + self.lqr_kRI * eI_hat - error_rotation @ omega_hat
-        e_omega = self.vee(self.skew(e_omega_matrix))
-
-        x = np.concatenate((self.eR_int, e_R, e_omega))
-        u_M = -(self.lqr_gain @ x)
-        return self._lqr_virtual_input_to_moment(error_rotation, R, R_des, omega_hat, u_M), e_w
+        return self._ardupilot_pid_control(R, R_des, e_R, yaw_rate_des, dt)
 
     def _ardupilot_pid_control(self, R, R_des, e_R, yaw_rate_des, dt):
         # ArduPilot's custom PID backend uses attitude error -> body-rate target,
@@ -540,7 +586,7 @@ class BaseControlController:
         accel_xy += self.apm_xy_vel_d * vel_error_d
         return accel_xy + accel_des_xy
 
-    def _apm_z_throttle(self, pos_des_z, vel_des_z, accel_des_z, dt, takeoff_window=False):
+    def _apm_z_throttle(self, pos_des_z, vel_des_z, accel_des_z, dt):
         vel_target_z = self.apm_z_pos_p * (pos_des_z - self.p[2]) + vel_des_z
         accel_target_z = self.apm_z_vel_p * (vel_target_z - self.v[2]) + accel_des_z
         accel_target_z = float(np.clip(accel_target_z, -self.apm_z_accel_limit, self.apm_z_accel_limit))
@@ -569,23 +615,13 @@ class BaseControlController:
             (throttle_with_i >= 1.0 and filtered_error > 0.0)
             or (throttle_with_i <= 0.0 and filtered_error < 0.0)
         )
-        if takeoff_window and filtered_error < 0.0:
-            self.apm_z_accel_int = max(0.0, self.apm_z_accel_int)
-        elif not throttle_saturated or not drives_away_from_limit:
+        if not throttle_saturated or not drives_away_from_limit:
             self.apm_z_accel_int += self.apm_z_accel_i * filtered_error * dt
             self.apm_z_accel_int = float(
                 np.clip(self.apm_z_accel_int, -self.apm_z_accel_imax, self.apm_z_accel_imax)
             )
 
         return float(np.clip(throttle_without_i + self.apm_z_accel_int, 0.0, 1.0))
-
-    def _in_takeoff_window(self, pos_des_z):
-        return (pos_des_z - self.p[2]) > self.takeoff_error_gate and self.p[2] < self.takeoff_altitude_gate
-
-    def _takeoff_xy_scale(self, pos_des_z):
-        if pos_des_z <= self.p[2] or self.p[2] >= self.takeoff_altitude_gate:
-            return 1.0
-        return float(np.clip(self.p[2] / self.takeoff_altitude_gate, 0.25, 1.0))
 
     def _angle_boost_value(self, value, R, R_des):
         ez = np.array([0.0, 0.0, 1.0])
@@ -604,45 +640,6 @@ class BaseControlController:
         )
         self.filtered_throttle = float(filtered)
         return float(np.clip(self.filtered_throttle, 0.0, 1.0))
-
-    def _build_lqr_gain(self):
-        if self.lqr_q.shape != (9,):
-            raise ValueError("lqr_q must contain 9 values for [eI, eR, eOmega]")
-        if self.lqr_ru.shape != (3,):
-            raise ValueError("lqr_ru must contain 3 input weights")
-
-        identity = np.eye(3)
-        zeros = np.zeros((3, 3))
-        kRP = self.lqr_kRP
-        kRI = self.lqr_kRI
-
-        # This follows the 9-state construction in base_control.pdf 2.3.2:
-        # x = [integral attitude error, attitude error, residual/rate error].
-        # The paper then solves a continuous Riccati equation for u_M.
-        a_matrix = np.block(
-            [
-                [zeros, identity, zeros],
-                [kRI * identity, kRP * identity, -identity],
-                [kRP * kRI * identity, (kRP * kRP + kRI) * identity, -kRP * identity],
-            ]
-        )
-        b_matrix = np.vstack((zeros, zeros, -identity))
-        q_matrix = np.diag(self.lqr_q)
-        ru_matrix = np.diag(self.lqr_ru)
-
-        p_matrix = solve_continuous_are(a_matrix, b_matrix, q_matrix, ru_matrix)
-        return np.linalg.solve(ru_matrix, b_matrix.T @ p_matrix)
-
-    def _lqr_virtual_input_to_moment(self, error_rotation, R, R_des, omega_hat, u_M):
-        inertia_omega = self.inertia @ self.w
-        gyro_term = np.cross(inertia_omega, self.w)
-        angular_accel_drift = np.linalg.solve(self.inertia, gyro_term)
-
-        m_cmd_1 = error_rotation @ omega_hat @ omega_hat
-        m_cmd_1 += error_rotation @ self.hat(angular_accel_drift)
-
-        mapped = R.T @ R_des @ (-m_cmd_1 + self.hat(u_M))
-        return self.inertia @ self.vee(self.skew(mapped))
 
     def _limit_tilt(self, a_cmd):
         norm = np.linalg.norm(a_cmd)
@@ -684,26 +681,14 @@ class BaseControlController:
     def vee(S):
         return np.array([-S[1, 2], S[0, 2], -S[0, 1]])
 
-    @staticmethod
-    def hat(v):
-        return np.array(
-            [
-                [0.0, -v[2], v[1]],
-                [v[2], 0.0, -v[0]],
-                [-v[1], v[0], 0.0],
-            ]
-        )
-
-    @staticmethod
-    def skew(A):
-        return 0.5 * (A - A.T)
-
     def reset_statistics(self):
         self.total_time = 0.0
         self.time_vector = []
         self.position_over_time = []
         self.desired_position_over_time = []
         self.position_error_over_time = []
+        self.velocity_over_time = []
+        self.desired_velocity_over_time = []
         self.velocity_error_over_time = []
         self.attitude_error_over_time = []
         self.attitude_rate_error_over_time = []
@@ -712,6 +697,12 @@ class BaseControlController:
         self.angular_rate_over_time = []
         self.desired_angular_rate_over_time = []
         self.control_over_time = []
+        self.actuator_over_time = []
+        self.allocation_time_vector = []
+        self.allocation_target_over_time = []
+        self.allocation_allocated_over_time = []
+        self.allocation_residual_over_time = []
+        self.allocation_norm_over_time = []
 
     @staticmethod
     def _matrix_to_euler_xyz(matrix):
